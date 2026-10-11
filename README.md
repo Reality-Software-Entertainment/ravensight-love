@@ -16,32 +16,36 @@ and Huginn, the AI analyst, can answer questions about them.
 A love.js build runs inside a web page, where Lua cannot make a request. So
 the page does the sending: it loads the Ravensight JavaScript SDK
 ([ravensight-js](https://www.npmjs.com/package/ravensight), 0.4.0 or newer),
-and the Lua SDK hands it every call. Nothing changes in your Lua code.
+and the Lua SDK hands it every call. Your `track`, `submitFeedback`,
+`setTrackingEnabled` and `flush` calls stay as they are; what differs is
+which SDK events fire (see below).
 
-1. Copy `web/ravensight-love-bridge.js` from this repo next to your
-   `index.html`, and the JavaScript SDK too: `src/index.js` of the
-   `ravensight` npm package, saved as `ravensight/index.js`.
-2. In the `index.html` that love.js made, install the bridge on `Module`
-   before the page calls `Love(Module)`:
+1. Put two files in the folder love.js made, next to its `index.html`:
+   `web/ravensight-love-bridge.js` from this repo, and the JavaScript SDK,
+   `src/index.js` of the `ravensight` npm package, saved as
+   `ravensight/index.js`.
+2. In that `index.html`, leave everything as love.js wrote it (the global
+   `var Module`, `game.js` and the async `love.js` script) and replace only
+   `applicationLoad`, which love.js calls once it has loaded:
 
-```html
-<script src="love.js"></script>
-<script type="module">
-  import Ravensight from './ravensight/index.js';
-  import { installRavensightBridge, ravensightLoveEnabled } from './ravensight-love-bridge.js';
-
+```js
+var applicationLoad = async function () {
+  const { default: Ravensight } = await import('./ravensight/index.js');
+  const { installRavensightBridge, ravensightLoveEnabled } = await import('./ravensight-love-bridge.js');
+  const enabled = ravensightLoveEnabled();   // false after the player opted out
   const rs = new Ravensight({
-    ingestKey: 'gt_live_...',          // the same key as in your Lua init
+    ingestKey: 'gt_live_...',                // the same key as in your Lua init
     gameVersion: '1.0.0',
-    enabled: ravensightLoveEnabled(),  // false after the player opted out
+    enabled,
   });
-  rs.init();                           // this SDK sends game_started and game_exited
-
-  const Module = { canvas: document.getElementById('canvas'), arguments: ['./game.love'] };
-  installRavensightBridge(rs, Module);   // before Love(Module)
+  if (enabled) rs.init();                    // this SDK sends game_started and game_exited
+  installRavensightBridge(rs, Module);       // before Love(Module)
   Love(Module);
-</script>
+};
 ```
+
+The bridge has to be on `Module` before `Love(Module)` runs, because love.js
+reads `Module.print` once, at that moment.
 
 The SDK notices the web build by itself (`love.system.getOS()` is `"Web"`),
 or you can force it with `transport = "web"`. It then prints each `track`,
@@ -55,7 +59,11 @@ lifecycle events, `game_started` and `game_exited`, so the Lua SDK sends
 neither of them there. `init()` returns
 `{ sessionReady = false, reason = "web_bridge" }`, `getTransport()` is
 `"web"`, `getDeviceId()` is `nil`, and `resetDeviceId()` is a call to make
-on the page's SDK instead.
+on the page's SDK instead. Of the SDK events, only `event_tracked`,
+`tracking_disabled` and `feedback_failed` (for a refusal before sending, such
+as `"invalid_category"`) fire in a web build; `session_ready`,
+`session_failed`, `events_flushed`, `flush_failed` and `feedback_submitted`
+belong to the page's SDK and never fire in Lua there.
 
 A player's opt-out on the web: `setTrackingEnabled(false)` prints a line that
 switches the page's SDK off at once, and the bridge remembers the choice in
@@ -64,6 +72,10 @@ the page's `localStorage` (`ravensight.love.enabled`). On the next visit,
 opted-out player opens no session and sends no `game_started`. Where
 `localStorage` is blocked, the choice still holds for that visit, and the
 game's own saved opt-out switches the page off again once the game has loaded.
+A player who opts back in through the game is counted again from that moment,
+and the bridge starts the page's SDK if it never started, but there is no
+`game_started` for that visit: the page's SDK sends it only when it is
+constructed.
 
 To switch analytics off for a whole web build, pass `enabled: false` to the
 page's SDK as well as `enabled = false` to `init`. With `enabled = false`,
@@ -154,7 +166,7 @@ It still records `game_exited` and tries to send it.
 | `ingestKey` | required | Your game's `gt_live_` key. |
 | `apiUrl` | `https://api.ravensight.io` | With or without `/api/v1`. |
 | `gameVersion` | `1.0.0` | Sent with every session. |
-| `enabled` | `true` | `false` sends and queues nothing for this run, and is not saved. `setTrackingEnabled(true)` does not turn it back on. |
+| `enabled` | `true` | `false` sends and queues nothing for this run, and is not saved. `setTrackingEnabled` still saves the player's choice, and `isTrackingEnabled()` reports it, but neither turns the SDK on. |
 | `maxQueueSize` | `500` | Unsent events kept. The oldest are dropped first. |
 | `flushInterval` | `2` | Seconds an event waits so it can go out with others. 50 waiting events go at once. |
 | `handleQuit` | `true` | Hold the quit up to 1.5 seconds to send the last events. |
@@ -169,7 +181,7 @@ It still records `game_exited` and tries to send it.
 | --- | --- |
 | `track(name, data)` | Queue an event. `data` is a flat table of strings, numbers and booleans. Safe before the session is ready. |
 | `flush()` | Send what is queued now instead of waiting for the timer. |
-| `submitFeedback(message, category, rating)` | Send player feedback. `category` is optional and one of `bug`, `suggestion`, `complaint`, `praise`, `playtest` or `other`; `rating` (1 to 5) is optional. Needs an open session. Returns `true` when sent, or `false` and a reason (`"invalid_category"`, `"no_session"`, `"empty_message"`, `"tracking_disabled"`, or `"not_started"` before `init` or with `enabled = false`) when refused before sending. |
+| `submitFeedback(message, category, rating)` | Send player feedback. `category` is optional and one of `bug`, `suggestion`, `complaint`, `praise`, `playtest` or `other`; `rating` is optional and a whole number from 1 to 5. Needs an open session. Returns `true` when sent, or `false` and a reason (`"invalid_category"`, `"invalid_rating"`, `"no_session"`, `"empty_message"`, `"tracking_disabled"`, or `"not_started"` before `init` or with `enabled = false`) when refused before sending. |
 | `setTrackingEnabled(enabled)` | The player's opt-out, remembered across launches. `false` drops the queue and sends nothing, not even the startup check. |
 | `isTrackingEnabled()` | `false` when the player opted out or tracking is switched off for your game. |
 | `resetDeviceId()` | Start a fresh analytics identity for this install. |
@@ -189,7 +201,7 @@ It still records `game_exited` and tries to send it.
 | `events_flushed` | `count` | A batch was accepted. |
 | `flush_failed` | `reason` | A batch failed. It is retried for you. |
 | `feedback_submitted` | | Feedback was accepted. |
-| `feedback_failed` | `reason` | Feedback failed, including `"no_session"` when sent too early and `"invalid_category"`. |
+| `feedback_failed` | `reason` | Feedback failed, including `"no_session"` when sent too early, `"invalid_category"` and `"invalid_rating"`. |
 | `event_tracked` | `name, data` | Every queued event, with the data actually queued. |
 
 ```lua

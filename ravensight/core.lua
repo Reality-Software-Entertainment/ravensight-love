@@ -502,6 +502,11 @@ function Core.isFeedbackCategory(category)
   return category == nil or category == '' or Core.FEEDBACK_CATEGORIES[category] == true
 end
 
+--- True when rating is absent or a whole number from 1 to 5.
+function Core.isFeedbackRating(rating)
+  return rating == nil or (type(rating) == 'number' and rating >= 1 and rating <= 5 and rating == math.floor(rating))
+end
+
 --- Send free-form player feedback. category and rating (1 to 5) are optional;
 --- category is one of bug, suggestion, complaint, praise, playtest, other.
 --- Returns true when the request went out, or false and a reason when it was
@@ -521,6 +526,11 @@ function Core:submitFeedback(message, category, rating)
     self:emit('feedback_failed', 'invalid_category')
     return false, 'invalid_category'
   end
+  if not Core.isFeedbackRating(rating) then
+    self.log('warn', 'feedback_rejected invalid_rating ' .. tostring(rating))
+    self:emit('feedback_failed', 'invalid_rating')
+    return false, 'invalid_rating'
+  end
   if not self:isSessionValid() then
     self:emit('feedback_failed', 'no_session')
     if not self.sessionPending then self:startSession() end
@@ -528,7 +538,7 @@ function Core:submitFeedback(message, category, rating)
   end
   local payload = { message = message }
   if category and category ~= '' then payload.category = category end
-  if rating and rating > 0 then payload.rating = math.floor(rating) end
+  if rating then payload.rating = rating end
   self.send({
     method = 'POST',
     url = self.apiUrl .. '/api/v1/feedback',

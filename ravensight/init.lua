@@ -330,16 +330,23 @@ function ravensight.submitFeedback(message, category, rating)
 end
 
 --- Player opt-out, remembered across launches. Wire it to your own consent
---- or settings screen; Ravensight ships no consent UI. It cannot turn the SDK
---- back on after init({ enabled = false }): that choice is the game's, for
---- the whole run.
+--- or settings screen; Ravensight ships no consent UI. After
+--- init({ enabled = false }) the choice is still saved, but it cannot turn
+--- the SDK on: that choice is the game's, for the whole run.
 function ravensight.setTrackingEnabled(enabled)
-  if core then core:setTrackingEnabled(enabled) end
+  if core then
+    core:setTrackingEnabled(enabled)
+  elseif initialized then
+    if enabled then storage.remove(Core.OPTOUT_FILE) else storage.write(Core.OPTOUT_FILE, '1') end
+  end
 end
 
---- True while events are being collected.
+--- True while events are being collected. After init({ enabled = false })
+--- nothing is collected, and this reports the player's saved choice, so a
+--- settings toggle still shows the right state.
 function ravensight.isTrackingEnabled()
-  return core ~= nil and core:isTrackingEnabled()
+  if core then return core:isTrackingEnabled() end
+  return initialized and storage.read(Core.OPTOUT_FILE) == nil
 end
 
 --- Starts a fresh analytics identity for this install. In a web build the

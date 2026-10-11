@@ -9,7 +9,8 @@
 //   feedback  rs.submitFeedback(message, category, rating)
 //   enabled   rs.setEnabled(value), and the choice is remembered in
 //             localStorage so the next page load can start the SDK switched
-//             off, before any session or game_started (ravensightLoveEnabled)
+//             off, before any session or game_started (ravensightLoveEnabled).
+//             Opting back in calls rs.init() if the page never did.
 //   flush     rs.flush()
 //
 // Every other line, and any tagged line that is not valid JSON, goes to the
@@ -107,6 +108,10 @@ export function installRavensightBridge(rs, Module, options = {}) {
       case 'enabled':
         remember(msg.value === true);
         guard('enabled', () => rs.setEnabled(msg.value === true));
+        // A page that started opted out skipped init(); opting back in starts it.
+        if (msg.value === true && rs.initialized === false && typeof rs.init === 'function') {
+          guard('init', () => rs.init());
+        }
         return true;
       case 'flush':
         guard('flush', () => rs.flush());

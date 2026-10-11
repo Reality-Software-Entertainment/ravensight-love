@@ -126,6 +126,17 @@ test('ravensightLoveEnabled is true when nothing is remembered or storage is blo
   assert.equal(ravensightLoveEnabled(null), true);
 });
 
+test('opting back in starts a page SDK that was never initialised', () => {
+  const { rs, calls } = fakeRs();
+  rs.initialized = false;
+  rs.init = () => { calls.push(['init']); rs.initialized = true; return Promise.resolve({}); };
+  const { Module } = fakeModule();
+  installRavensightBridge(rs, Module, { storage: memoryStorage() });
+  Module.print(line({ v: 1, op: 'enabled', value: true }));
+  Module.print(line({ v: 1, op: 'enabled', value: true }));
+  assert.deepEqual(calls, [['setEnabled', true], ['init'], ['setEnabled', true]]);
+});
+
 test('blocked storage does not stop the opt-out reaching the SDK', () => {
   const { rs, calls } = fakeRs();
   const { Module } = fakeModule();

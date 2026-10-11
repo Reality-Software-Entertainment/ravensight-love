@@ -117,9 +117,14 @@ function Web:submitFeedback(message, category, rating)
     self:emit('feedback_failed', 'invalid_category')
     return false, 'invalid_category'
   end
+  if not Core.isFeedbackRating(rating) then
+    self.log('warn', 'feedback_rejected invalid_rating ' .. tostring(rating))
+    self:emit('feedback_failed', 'invalid_rating')
+    return false, 'invalid_rating'
+  end
   local payload = { op = 'feedback', message = message }
   if category and category ~= '' then payload.category = category end
-  if type(rating) == 'number' and rating > 0 then payload.rating = math.floor(rating) end
+  if rating then payload.rating = rating end
   self:send(payload)
   return true
 end

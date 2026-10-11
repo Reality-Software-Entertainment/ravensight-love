@@ -411,4 +411,19 @@ return {
     h.answer('/api/v1/track/batch', 202)
     eq(h.batchBody(h.answer('/api/v1/track/batch', 202))[1].event, 'during_flight')
   end },
+  { 'a feedback rating outside 1 to 5 or not whole is refused here', function()
+    local h = harness()
+    h.boot()
+    h.openSession()
+    h.answer('/api/v1/track/batch', 202)
+    for _, bad in ipairs({ 0, 6, 4.5, 'good' }) do
+      local ok, reason = h.core:submitFeedback('hi', 'praise', bad)
+      eq(ok, false, tostring(bad)); eq(reason, 'invalid_rating', tostring(bad))
+    end
+    eq(#h.requests, 0)
+    eq(h.fired('feedback_failed')[2], 'invalid_rating')
+    eq(h.logs[#h.logs], 'warn feedback_rejected invalid_rating good')
+    eq(h.core:submitFeedback('hi', 'praise', 5), true)
+    eq(json.decode(h.answer('/api/v1/feedback', 201).body).rating, 5)
+  end },
 }

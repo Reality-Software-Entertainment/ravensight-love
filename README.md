@@ -186,6 +186,7 @@ It still records `game_exited` and tries to send it.
 | `isTrackingEnabled()` | `false` when the player opted out or tracking is switched off for your game. |
 | `resetDeviceId()` | Start a fresh analytics identity for this install. |
 | `getDeviceId()` | This install's random id. |
+| `setPlaytestContext(ctx)` | Puts a running game into playtest mode. `ctx` needs `token` and `run_id` (plus optional `persona`, `job_id` and `tier`), the same values the playtest CLI passes as `RAVENSIGHT_PLAYTEST_*` variables; it uses a throwaway device id, ignores the player's opt-out, and tags every event as synthetic. `init` already does this when those variables are set, so a game never needs to call it by hand. |
 | `getTransport()` | How requests are sent here, or `nil` if nothing works. |
 | `on(event, fn)` | Listen for an SDK event. Returns a function that stops listening. |
 | `update(dt)` | Call every frame. Delivers answers and runs the batching timer and retries. |

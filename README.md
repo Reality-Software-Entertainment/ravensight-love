@@ -28,13 +28,14 @@ and the Lua SDK hands it every call. Nothing changes in your Lua code.
 <script src="love.js"></script>
 <script type="module">
   import Ravensight from './ravensight/index.js';
-  import { installRavensightBridge } from './ravensight-love-bridge.js';
+  import { installRavensightBridge, ravensightLoveEnabled } from './ravensight-love-bridge.js';
 
   const rs = new Ravensight({
-    ingestKey: 'gt_live_...',      // the same key as in your Lua init
+    ingestKey: 'gt_live_...',          // the same key as in your Lua init
     gameVersion: '1.0.0',
+    enabled: ravensightLoveEnabled(),  // false after the player opted out
   });
-  rs.init();                       // this SDK sends game_started and game_exited
+  rs.init();                           // this SDK sends game_started and game_exited
 
   const Module = { canvas: document.getElementById('canvas'), arguments: ['./game.love'] };
   installRavensightBridge(rs, Module);   // before Love(Module)
@@ -54,10 +55,20 @@ lifecycle events, `game_started` and `game_exited`, so the Lua SDK sends
 neither of them there. `init()` returns
 `{ sessionReady = false, reason = "web_bridge" }`, `getTransport()` is
 `"web"`, `getDeviceId()` is `nil`, and `resetDeviceId()` is a call to make
-on the page's SDK instead. A player's opt-out is still saved in the game's
-save folder and passed to the page each time the game starts. To switch
-analytics off for a whole web build, pass `enabled: false` to the page's SDK
-as well as `enabled = false` to `init`.
+on the page's SDK instead.
+
+A player's opt-out on the web: `setTrackingEnabled(false)` prints a line that
+switches the page's SDK off at once, and the bridge remembers the choice in
+the page's `localStorage` (`ravensight.love.enabled`). On the next visit,
+`ravensightLoveEnabled()` reads it before the page's SDK is constructed, so an
+opted-out player opens no session and sends no `game_started`. Where
+`localStorage` is blocked, the choice still holds for that visit, and the
+game's own saved opt-out switches the page off again once the game has loaded.
+
+To switch analytics off for a whole web build, pass `enabled: false` to the
+page's SDK as well as `enabled = false` to `init`. With `enabled = false`,
+`init` returns `nil` in a web build too: the SDK starts nothing and prints
+nothing.
 
 ## Install
 
@@ -158,7 +169,7 @@ It still records `game_exited` and tries to send it.
 | --- | --- |
 | `track(name, data)` | Queue an event. `data` is a flat table of strings, numbers and booleans. Safe before the session is ready. |
 | `flush()` | Send what is queued now instead of waiting for the timer. |
-| `submitFeedback(message, category, rating)` | Send player feedback. `category` is optional and one of `bug`, `suggestion`, `complaint`, `praise`, `playtest` or `other`; `rating` (1 to 5) is optional. Needs an open session. Returns `true` when sent, or `false` and a reason (`"invalid_category"`, `"no_session"`, `"empty_message"`, `"tracking_disabled"`) when refused before sending. |
+| `submitFeedback(message, category, rating)` | Send player feedback. `category` is optional and one of `bug`, `suggestion`, `complaint`, `praise`, `playtest` or `other`; `rating` (1 to 5) is optional. Needs an open session. Returns `true` when sent, or `false` and a reason (`"invalid_category"`, `"no_session"`, `"empty_message"`, `"tracking_disabled"`, or `"not_started"` before `init` or with `enabled = false`) when refused before sending. |
 | `setTrackingEnabled(enabled)` | The player's opt-out, remembered across launches. `false` drops the queue and sends nothing, not even the startup check. |
 | `isTrackingEnabled()` | `false` when the player opted out or tracking is switched off for your game. |
 | `resetDeviceId()` | Start a fresh analytics identity for this install. |
@@ -277,7 +288,7 @@ synthetic, so persona sessions never mix with real players.
 | `maxQueueSize` default | 500 | 500 |
 | `enabled` option | Yes | Yes |
 | Player opt-out | `setTrackingEnabled(false)`, saved | `setEnabled(false)` |
-| Batching | Every 2 seconds, or at 50 events | On a timer, or at 50 events |
+| Batching | 2 seconds after the first waiting event, or at 50 events | On a timer, or at 50 events |
 | Web | Through the bridge to the JavaScript SDK | Runs on the page |
 
 ## Develop

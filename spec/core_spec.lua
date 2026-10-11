@@ -402,4 +402,13 @@ return {
       h.answer('/api/v1/feedback', 201)
     end
   end },
+  { 'an event tracked while a request is in flight is sent right after the 202', function()
+    local h = harness()
+    h.boot()
+    h.openSession()
+    h.core:track('during_flight', {})
+    eq(#h.requests, 1, 'only the game_started batch is out')
+    h.answer('/api/v1/track/batch', 202)
+    eq(h.batchBody(h.answer('/api/v1/track/batch', 202))[1].event, 'during_flight')
+  end },
 }

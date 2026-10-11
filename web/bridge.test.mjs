@@ -1,7 +1,7 @@
-// node --test web
+// node --test web/bridge.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { installRavensightBridge, TAG } from './ravensight-love-bridge.js';
+import { installRavensightBridge, ravensightLoveEnabled, ENABLED_KEY, TAG } from './ravensight-love-bridge.js';
 
 function fakeRs({ withFeedback = true } = {}) {
   const calls = [];
@@ -90,4 +90,46 @@ test('without a print of its own, Module falls back to console.log', (t) => {
 test('refuses a missing client or Module', () => {
   assert.throws(() => installRavensightBridge(null, {}), TypeError);
   assert.throws(() => installRavensightBridge(fakeRs().rs, null), TypeError);
+});
+
+function memoryStorage() {
+  const data = new Map();
+  return {
+    data,
+    getItem: (k) => (data.has(k) ? data.get(k) : null),
+    setItem: (k, v) => data.set(k, String(v)),
+  };
+}
+
+const throwingStorage = {
+  getItem() { throw new Error('blocked'); },
+  setItem() { throw new Error('blocked'); },
+};
+
+test('an enabled line remembers the choice in storage', () => {
+  const { rs, calls } = fakeRs();
+  const { Module } = fakeModule();
+  const storage = memoryStorage();
+  installRavensightBridge(rs, Module, { storage });
+  Module.print(line({ v: 1, op: 'enabled', value: false }));
+  assert.equal(storage.data.get(ENABLED_KEY), 'false');
+  assert.equal(ravensightLoveEnabled(storage), false);
+  Module.print(line({ v: 1, op: 'enabled', value: true }));
+  assert.equal(storage.data.get(ENABLED_KEY), 'true');
+  assert.equal(ravensightLoveEnabled(storage), true);
+  assert.deepEqual(calls, [['setEnabled', false], ['setEnabled', true]]);
+});
+
+test('ravensightLoveEnabled is true when nothing is remembered or storage is blocked', () => {
+  assert.equal(ravensightLoveEnabled(memoryStorage()), true);
+  assert.equal(ravensightLoveEnabled(throwingStorage), true);
+  assert.equal(ravensightLoveEnabled(null), true);
+});
+
+test('blocked storage does not stop the opt-out reaching the SDK', () => {
+  const { rs, calls } = fakeRs();
+  const { Module } = fakeModule();
+  installRavensightBridge(rs, Module, { storage: throwingStorage });
+  Module.print(line({ v: 1, op: 'enabled', value: false }));
+  assert.deepEqual(calls, [['setEnabled', false]]);
 });

@@ -97,6 +97,7 @@ function Web:track(name, data)
 end
 
 function Web:flush()
+  if not self.trackingEnabled then return end
   self:send({ op = 'flush' })
 end
 

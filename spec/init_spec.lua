@@ -109,8 +109,20 @@ return {
       w.sdk.update(0.016)
       w.sdk.flush()
       eq(w.lines[#w.lines], '__RAVENSIGHT__ {"op":"flush","v":1}')
+      w.sdk.setTrackingEnabled(false)
+      local before = #w.lines
+      w.sdk.flush()
+      eq(#w.lines, before, 'flush is silent while opted out')
       eq(w.sdk.quit(), false)
-      eq(#w.ops(), 1, 'quit sends no game_exited from Lua')
+      eq(#w.ops(), 2, 'quit sends no game_exited from Lua (flush, then enabled)')
+    end)
+  end },
+  { 'enabled = false in a web build returns nil and prints nothing', function()
+    run('Web', nil, function(w)
+      eq(w.sdk.init({ ingestKey = 'gt_live_k', enabled = false }), nil)
+      w.sdk.track('e', {})
+      w.sdk.flush()
+      eq(#w.lines, 0)
     end)
   end },
   { 'enabled = false: no session, no queue, every call a silent no-op', function()

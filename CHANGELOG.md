@@ -14,6 +14,9 @@
   page, which owns the session, the device id, `game_started` and
   `game_exited`. `init()` returns `{ sessionReady = false, reason =
   "web_bridge" }` there.
+  The bridge remembers a player's opt-out in `localStorage`, and
+  `ravensightLoveEnabled()` lets the page start its SDK switched off on the
+  next visit, before any session or `game_started`.
 - **`apiUrl`** works with or without a trailing `/api/v1` and trailing
   slashes.
 - **`maxQueueSize`** defaults to 500, as in the JavaScript SDK.

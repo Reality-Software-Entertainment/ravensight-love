@@ -1,5 +1,5 @@
 -- A dependency-free test runner: `luajit spec/run.lua` from the repo root.
--- The love.js bridge has its own Node test: `node --test web`.
+-- The love.js bridge has its own Node test: `node --test web/bridge.test.mjs`.
 -- Each spec file returns a list of {name, fn}; a failing assert fails the
 -- test, and the process exits non-zero if any test failed.
 

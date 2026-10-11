@@ -34,7 +34,7 @@ end
 
 function love.keypressed(key)
   if key == "escape" then love.event.quit() end
-  if key == "f" then ravensight.submitFeedback("Sent from the example game", "example", 5) end
+  if key == "f" then ravensight.submitFeedback("Sent from the example game", "other", 5) end
   if key == "o" then ravensight.setTrackingEnabled(not ravensight.isTrackingEnabled()) end
 end
 

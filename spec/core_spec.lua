@@ -7,12 +7,13 @@ local function eq(a, b, msg) assert(a == b, (msg or '') .. ' expected ' .. tostr
 -- answers one at a time, and storage that is a plain table.
 local function harness(opts)
   opts = opts or {}
-  local h = { requests = {}, files = opts.files or {}, clock = 0, wall = 1800000000, events = {} }
+  local h = { requests = {}, files = opts.files or {}, clock = 0, wall = 1800000000, events = {}, logs = {} }
   h.core = Core.new({
-    apiUrl = 'https://api.test/',
+    apiUrl = opts.apiUrl or 'https://api.test/',
     ingestKey = 'gt_live_k',
     gameVersion = '2.0.0',
-    maxQueueSize = opts.maxQueueSize or 100,
+    maxQueueSize = opts.maxQueueSize,
+    log = function(level, message) table.insert(h.logs, level .. ' ' .. message) end,
     send = function(req, cb) table.insert(h.requests, { req = req, cb = cb }) end,
     now = function() return h.clock end,
     time = function() return h.wall end,
@@ -276,10 +277,10 @@ return {
     eq(h.fired('feedback_failed')[2], 'no_session')
     h.openSession()
     h.answer('/api/v1/track/batch', 202)
-    h.core:submitFeedback('the boss is too hard', 'difficulty', 2)
+    eq(h.core:submitFeedback('the boss is too hard', 'suggestion', 2), true)
     local req = h.answer('/api/v1/feedback', 201)
     local body = json.decode(req.body)
-    eq(body.category, 'difficulty'); eq(body.rating, 2)
+    eq(body.category, 'suggestion'); eq(body.rating, 2)
     assert(h.fired('feedback_submitted'))
   end },
   { 'a playtest run tags every event, never saves its id and ignores an opt-out', function()
@@ -315,5 +316,90 @@ return {
     h.boot()
     h.openSession()
     h.answer('/api/v1/track/batch', 202)
+  end },
+  { 'six quick events go out as one request, and a later one after the interval', function()
+    local h = harness()
+    h.boot()
+    h.openSession()
+    h.answer('/api/v1/track/batch', 202)
+    for i = 1, 6 do h.core:track('e' .. i, { i = i }) end
+    eq(#h.requests, 0, 'track must not send at once')
+    h.clock = 1.9; h.core:update()
+    eq(#h.requests, 0, 'nothing is sent before the interval')
+    h.clock = 2.0; h.core:update()
+    local events = h.batchBody(h.answer('/api/v1/track/batch', 202))
+    eq(#events, 6)
+    eq(h.fired('events_flushed') and h.events[#h.events][2], 6)
+    local logged = false
+    for _, line in ipairs(h.logs) do if line == 'info events_flushed 6' then logged = true end end
+    assert(logged, 'expected the events_flushed 6 debug line')
+    h.core:track('e7', {})
+    h.clock = 3.9; h.core:update()
+    eq(#h.requests, 0, 'the seventh waits its own interval')
+    h.clock = 4.1; h.core:update()
+    eq(h.batchBody(h.answer('/api/v1/track/batch', 202))[1].event, 'e7')
+  end },
+  { 'flushInterval is an option', function()
+    local h = harness()
+    h.core.flushInterval = 0.5
+    h.boot()
+    h.openSession()
+    h.answer('/api/v1/track/batch', 202)
+    h.core:track('quick', {})
+    h.clock = 0.5; h.core:update()
+    h.answer('/api/v1/track/batch', 202)
+  end },
+  { 'a full request worth of events is sent without waiting', function()
+    local h = harness()
+    h.boot()
+    h.openSession()
+    h.answer('/api/v1/track/batch', 202)
+    for i = 1, 49 do h.core:track('e' .. i, {}) end
+    eq(#h.requests, 0)
+    h.core:track('e50', {})
+    eq(#h.batchBody(h.answer('/api/v1/track/batch', 202)), 50)
+  end },
+  { 'flush() sends at once', function()
+    local h = harness()
+    h.boot()
+    h.openSession()
+    h.answer('/api/v1/track/batch', 202)
+    h.core:track('now', {})
+    h.core:flush()
+    eq(h.batchBody(h.answer('/api/v1/track/batch', 202))[1].event, 'now')
+  end },
+  { 'apiUrl works with or without a trailing slash and /api/v1', function()
+    for _, url in ipairs({ 'https://api.ravensight.io', 'https://api.ravensight.io/', 'https://api.ravensight.io/api/v1', 'https://api.ravensight.io/api/v1/' }) do
+      local h = harness({ apiUrl = url })
+      h.core:start()
+      eq(h.requests[1].req.url, 'https://api.ravensight.io/api/v1/settings', url)
+      h.answer('/api/v1/settings', 200, { trackingEnabled = true })
+      eq(h.requests[1].req.url, 'https://api.ravensight.io/api/v1/session', url)
+    end
+  end },
+  { 'maxQueueSize defaults to 500', function()
+    local h = harness()
+    eq(h.core.maxQueueSize, 500)
+  end },
+  { 'an unknown feedback category is refused here and nothing is sent', function()
+    local h = harness()
+    h.boot()
+    h.openSession()
+    h.answer('/api/v1/track/batch', 202)
+    local ok, reason = h.core:submitFeedback('nice', 'example', 5)
+    eq(ok, false); eq(reason, 'invalid_category')
+    eq(#h.requests, 0)
+    eq(h.fired('feedback_failed')[2], 'invalid_category')
+    eq(h.logs[#h.logs], 'warn feedback_rejected invalid_category example')
+  end },
+  { 'every documented feedback category is accepted, and none at all', function()
+    for _, category in ipairs({ 'bug', 'suggestion', 'complaint', 'praise', 'playtest', 'other', nil }) do
+      local h = harness()
+      h.boot()
+      h.openSession()
+      h.answer('/api/v1/track/batch', 202)
+      eq(h.core:submitFeedback('hi', category), true)
+      h.answer('/api/v1/feedback', 201)
+    end
   end },
 }

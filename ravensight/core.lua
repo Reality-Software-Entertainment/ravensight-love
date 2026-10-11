@@ -11,7 +11,8 @@
 --   * a random per-install device id, 32 hex characters, a dash and the
 --     lowercased OS name, never derived from hardware or an account
 --   * GET /api/v1/settings once at start; the kill switch wins when off
---   * POST /api/v1/session, then POST /api/v1/track/batch, 50 events at most
+--   * POST /api/v1/session, then POST /api/v1/track/batch, 50 events at most,
+--     sent every flushInterval seconds (2 by default) or as soon as 50 wait
 --   * backoff from 10 seconds, doubling to a 5 minute cap, Retry-After obeyed
 --   * a 400 batch is halved until the one bad event is isolated and dropped
 --   * the player's opt-out is saved and honoured before anything is sent
@@ -27,11 +28,19 @@ local json = require(((...):gsub('core$', 'json')))
 local Core = {}
 Core.__index = Core
 
-Core.VERSION = '0.1.0'
+Core.VERSION = '0.2.0'
 Core.MAX_BATCH_SIZE = 50
 Core.DEFAULT_RETRY_SECONDS = 10
 Core.MAX_BACKOFF_SECONDS = 300
 Core.QUIT_FLUSH_TIMEOUT_SECONDS = 1.5
+Core.DEFAULT_FLUSH_INTERVAL_SECONDS = 2
+Core.DEFAULT_MAX_QUEUE_SIZE = 500
+
+--- The categories the feedback endpoint accepts. Anything else is refused
+--- before it is sent.
+Core.FEEDBACK_CATEGORIES = {
+  bug = true, suggestion = true, complaint = true, praise = true, playtest = true, other = true,
+}
 
 Core.DEVICE_ID_FILE = 'ravensight_device_id'
 Core.OPTOUT_FILE = 'ravensight_optout'
@@ -56,6 +65,7 @@ end
 --- deps:
 ---   apiUrl, ingestKey, gameVersion  configuration (strings)
 ---   maxQueueSize                    unsent events kept, oldest dropped first
+---   flushInterval                   seconds an event may wait before a flush
 ---   send(req, callback)             req = {method, url, headers, body};
 ---                                   callback(status, body, headers) where
 ---                                   status is 0 for a network failure and
@@ -70,10 +80,11 @@ end
 function Core.new(deps)
   assert(type(deps) == 'table', 'ravensight: core needs its dependencies')
   local self = setmetatable({}, Core)
-  self.apiUrl = (deps.apiUrl or ''):gsub('/+$', '')
+  self.apiUrl = Core.normalizeApiUrl(deps.apiUrl)
   self.ingestKey = deps.ingestKey or ''
   self.gameVersion = deps.gameVersion or '1.0.0'
-  self.maxQueueSize = deps.maxQueueSize or 100
+  self.maxQueueSize = deps.maxQueueSize or Core.DEFAULT_MAX_QUEUE_SIZE
+  self.flushInterval = deps.flushInterval or Core.DEFAULT_FLUSH_INTERVAL_SECONDS
   self.send = assert(deps.send, 'ravensight: core needs send')
   self.now = deps.now or os.clock
   self.time = deps.time or os.time
@@ -93,6 +104,7 @@ function Core.new(deps)
   self.serverTrackingEnabled = true
   self.playerOptedOut = false
   self.pending = {}
+  self.firstQueuedAt = nil
   self.flushInProgress = false
   self.queueGeneration = 0
   self.splitBatchSize = 0
@@ -111,6 +123,14 @@ function Core.new(deps)
     self:setPlaytestContext(deps.playtest)
   end
   return self
+end
+
+--- The API origin with any trailing slashes and a trailing /api/v1 taken
+--- off, so "https://api.ravensight.io", ".../" and ".../api/v1" all work.
+function Core.normalizeApiUrl(url)
+  local base = tostring(url or ''):gsub('/+$', '')
+  base = base:gsub('/api/v1$', '')
+  return base
 end
 
 --- Subscribe to an SDK event. Returns a function that unsubscribes.
@@ -169,7 +189,8 @@ function Core:generateDeviceId()
   return self.randomHex(16) .. '-' .. self.osName
 end
 
---- Drives timers: the retry wait and the quit deadline. Call every frame.
+--- Drives timers: the retry wait, the flush interval and the quit deadline.
+--- Call every frame. The clock is now(), so dt is not needed.
 function Core:update()
   local t = self.now()
   if self.retryAt and t >= self.retryAt then
@@ -177,6 +198,10 @@ function Core:update()
     if self.trackingEnabled then
       if not self:isSessionValid() then self:startSession() else self:flushPending() end
     end
+  end
+  -- The batching timer. A running retry wait owns the next send instead.
+  if not self.retryAt and self.firstQueuedAt and t - self.firstQueuedAt >= self.flushInterval then
+    self:flushPending()
   end
   if self.quitting and self.quitDeadline and t >= self.quitDeadline then
     self:finishQuit()
@@ -354,7 +379,9 @@ function Core:track(name, data)
   -- A retry wait is running: let it send, so backoff and Retry-After hold.
   if self.retryAt then return end
   if self:isSessionValid() then
-    self:flushPending()
+    -- Batched: update() sends once flushInterval has passed since the first
+    -- waiting event, or now when a full request's worth is waiting.
+    if #self.pending >= Core.MAX_BATCH_SIZE then self:flushPending() end
   elseif not self.sessionPending and not self.playtestBlocked then
     self:startSession()
   end
@@ -377,6 +404,7 @@ function Core:enqueue(name, data)
     for k, v in pairs(self.playtestTags) do eventData[k] = v end
   end
   table.insert(self.pending, { event = name, data = eventData, timestamp = self.time() })
+  if not self.firstQueuedAt then self.firstQueuedAt = self.now() end
   return eventData
 end
 
@@ -394,6 +422,7 @@ function Core:flushPending()
   if not self.trackingEnabled then return end
   if self.flushInProgress or #self.pending == 0 or not self:isSessionValid() then return end
   self.flushInProgress = true
+  self.firstQueuedAt = nil
 
   local size = math.min(Core.MAX_BATCH_SIZE, #self.pending)
   if self.splitBatchSize > 0 then size = math.min(size, self.splitBatchSize) end
@@ -423,6 +452,7 @@ function Core:onBatchResponse(status, body, headers, size, generation)
     self:dropFront(size)
     self.backoff = Core.DEFAULT_RETRY_SECONDS
     self.splitBatchSize = 0
+    self.log('info', 'events_flushed ' .. size)
     self:emit('events_flushed', size)
     if #self.pending > 0 then self:flushPending() end
   elseif status == 401 then
@@ -467,20 +497,34 @@ end
 
 -- ---------------------------------------------------------------- feedback
 
---- Send free-form player feedback. category and rating (1 to 5) are optional.
+--- True when category is absent or one the feedback endpoint accepts.
+function Core.isFeedbackCategory(category)
+  return category == nil or category == '' or Core.FEEDBACK_CATEGORIES[category] == true
+end
+
+--- Send free-form player feedback. category and rating (1 to 5) are optional;
+--- category is one of bug, suggestion, complaint, praise, playtest, other.
+--- Returns true when the request went out, or false and a reason when it was
+--- refused here. The server's answer arrives on feedback_submitted or
+--- feedback_failed.
 function Core:submitFeedback(message, category, rating)
   if not self.trackingEnabled then
     self:emit('feedback_failed', 'tracking_disabled')
-    return
+    return false, 'tracking_disabled'
   end
   if type(message) ~= 'string' or message == '' then
     self:emit('feedback_failed', 'empty_message')
-    return
+    return false, 'empty_message'
+  end
+  if not Core.isFeedbackCategory(category) then
+    self.log('warn', 'feedback_rejected invalid_category ' .. tostring(category))
+    self:emit('feedback_failed', 'invalid_category')
+    return false, 'invalid_category'
   end
   if not self:isSessionValid() then
     self:emit('feedback_failed', 'no_session')
     if not self.sessionPending then self:startSession() end
-    return
+    return false, 'no_session'
   end
   local payload = { message = message }
   if category and category ~= '' then payload.category = category end
@@ -497,6 +541,7 @@ function Core:submitFeedback(message, category, rating)
       self:emit('feedback_failed', extractError(body, status == 0 and 'network_error' or ('http_' .. tostring(status))))
     end
   end)
+  return true
 end
 
 -- ----------------------------------------------------------------- privacy
@@ -546,6 +591,7 @@ end
 
 function Core:clearQueue()
   self.pending = {}
+  self.firstQueuedAt = nil
   self.queueGeneration = self.queueGeneration + 1
   self.flushInProgress = false
   self.splitBatchSize = 0

@@ -14,8 +14,10 @@
 --
 --   ravensight.track("level_start", { level = "forest_1" })
 --
--- Works on LÖVE 11.x and 12.x, desktop (Windows, macOS, Linux). See
--- README.md for the full reference and https://ravensight.io/docs/#love-sdk.
+-- Works on LÖVE 11.x and 12.x, desktop (Windows, macOS, Linux). A love.js
+-- web build goes through the page's JavaScript SDK instead (see
+-- ravensight/web.lua). See README.md for the full reference and
+-- https://ravensight.io/docs/#love-sdk.
 --
 -- MIT licensed, part of ravensight-love.
 
@@ -27,7 +29,8 @@ local json = require(modulePrefix .. 'json')
 
 local ravensight = { VERSION = Core.VERSION }
 
-local core
+local core          -- the desktop state machine, or the web bridge
+local initialized = false
 local config
 local worker, requestChannel, responseChannel
 local nextRequestId = 0
@@ -54,8 +57,12 @@ local OS_NAMES = {
   Web = { 'Web', 'web' },
 }
 
+local function systemName()
+  return love.system and love.system.getOS() or 'unknown'
+end
+
 local function platformNames()
-  local os = love.system and love.system.getOS() or 'unknown'
+  local os = systemName()
   local names = OS_NAMES[os]
   if names then return names[1], names[2] end
   return os, (os:lower():gsub('[^a-z0-9]', ''))
@@ -197,39 +204,63 @@ end
 -- ------------------------------------------------------------- public API
 
 --- Starts the SDK. Call once, from love.load().
----   apiUrl        "https://api.ravensight.io" (no trailing slash, no /api/v1)
+---   apiUrl        "https://api.ravensight.io", with or without /api/v1
 ---   ingestKey     your game's publishable gt_live_ key
 ---   gameVersion   reported with every session, default "1.0.0"
----   maxQueueSize  unsent events kept, oldest dropped first, default 100
+---   enabled       false sends and queues nothing for this run, and is not
+---                 saved, default true
+---   maxQueueSize  unsent events kept, oldest dropped first, default 500
+---   flushInterval seconds an event waits to be batched, default 2
 ---   handleQuit    hold the quit for up to 1.5 s to send the last events,
 ---                 default true (needs love.quit to return ravensight.quit())
----   transport     "https", "winhttp", "libcurl" or "curl" to try first
+---   transport     "https", "winhttp", "libcurl" or "curl" to try first, or
+---                 "web" for the love.js bridge (automatic on the web)
+---   synchronous   send on the game's own thread, blocking, default false
 ---   timeout       seconds per request, default 15
 ---   debug         print informational messages too, default false
+---
+--- Returns nothing on the desktop. In a web build it returns
+--- { sessionReady = false, reason = 'web_bridge' }, since the page's
+--- JavaScript SDK opens the session.
 function ravensight.init(options)
   assert(type(options) == 'table', 'ravensight.init: pass a table of options')
   assert(type(options.ingestKey) == 'string' and options.ingestKey ~= '', 'ravensight.init: ingestKey is required')
-  if core then
+  if initialized then
     log('warn', 'init() called twice; the second call is ignored')
     return
   end
+  initialized = true
   config = {
     apiUrl = options.apiUrl or 'https://api.ravensight.io',
     ingestKey = options.ingestKey,
     gameVersion = options.gameVersion or '1.0.0',
-    maxQueueSize = options.maxQueueSize or 100,
+    enabled = options.enabled ~= false,
+    maxQueueSize = options.maxQueueSize or Core.DEFAULT_MAX_QUEUE_SIZE,
+    flushInterval = options.flushInterval or Core.DEFAULT_FLUSH_INTERVAL_SECONDS,
     handleQuit = options.handleQuit ~= false,
     transport = options.transport,
     timeout = options.timeout or 15,
     debug = options.debug == true,
     synchronous = options.synchronous == true,
   }
+  -- Switched off by the game: no session, no queue, every call a no-op.
+  if not config.enabled then
+    log('info', 'disabled by the enabled option; nothing is sent this run')
+    return
+  end
+  if config.transport == 'web' or systemName() == 'Web' then
+    core = require(modulePrefix .. 'web').new({ storage = storage, log = log })
+    transportName = 'web'
+    core:start()
+    return { sessionReady = false, reason = 'web_bridge' }
+  end
   local platform, osName = platformNames()
   core = Core.new({
     apiUrl = config.apiUrl,
     ingestKey = config.ingestKey,
     gameVersion = config.gameVersion,
     maxQueueSize = config.maxQueueSize,
+    flushInterval = config.flushInterval,
     send = send,
     now = love.timer and love.timer.getTime or os.clock,
     time = os.time,
@@ -244,9 +275,10 @@ function ravensight.init(options)
   core:start()
 end
 
---- Delivers answers and runs the retry timer. Call from love.update().
+--- Delivers answers and runs the batching and retry timers. Call from
+--- love.update(dt).
 function ravensight.update()
-  if not core then return end
+  if not core or transportName == 'web' then return end
   pollResponses()
   core:update()
   if holdingQuit and core.quitReady then
@@ -261,7 +293,7 @@ end
 --- or 1.5 seconds pass. Returns false when there is nothing to wait for.
 --- With handleQuit = false it records and flushes, and never delays.
 function ravensight.quit()
-  if not core then return false end
+  if not core or transportName == 'web' then return false end
   if core.quitReady then
     if requestChannel then requestChannel:push('stop') end
     return false
@@ -282,19 +314,25 @@ function ravensight.track(name, data)
   if core then core:track(name, data) end
 end
 
---- Send what is queued now instead of on the next event.
+--- Send what is queued now instead of waiting for the batching timer.
 function ravensight.flush()
   if core then core:flush() end
 end
 
---- Send player feedback. category and rating (1 to 5) are optional. The
---- answer arrives on "feedback_submitted" or "feedback_failed".
+--- Send player feedback. category (bug, suggestion, complaint, praise,
+--- playtest or other) and rating (1 to 5) are optional. Returns true when it
+--- was sent, or false and a reason ("invalid_category", "no_session", ...)
+--- when it was refused before sending. The server's answer arrives on
+--- "feedback_submitted" or "feedback_failed".
 function ravensight.submitFeedback(message, category, rating)
-  if core then core:submitFeedback(message, category, rating) end
+  if not core then return false, 'not_started' end
+  return core:submitFeedback(message, category, rating)
 end
 
 --- Player opt-out, remembered across launches. Wire it to your own consent
---- or settings screen; Ravensight ships no consent UI.
+--- or settings screen; Ravensight ships no consent UI. It cannot turn the SDK
+--- back on after init({ enabled = false }): that choice is the game's, for
+--- the whole run.
 function ravensight.setTrackingEnabled(enabled)
   if core then core:setTrackingEnabled(enabled) end
 end
@@ -304,18 +342,25 @@ function ravensight.isTrackingEnabled()
   return core ~= nil and core:isTrackingEnabled()
 end
 
---- Starts a fresh analytics identity for this install.
+--- Starts a fresh analytics identity for this install. In a web build the
+--- page owns the id; call the JavaScript SDK there instead.
 function ravensight.resetDeviceId()
-  if core then core:resetDeviceId() end
+  if not core then return end
+  if transportName == 'web' then
+    log('info', 'resetDeviceId() is handled by ravensight-js on the page in a web build')
+    return
+  end
+  core:resetDeviceId()
 end
 
---- This install's random device id.
+--- This install's random device id. nil in a web build, where the page's
+--- JavaScript SDK keeps it.
 function ravensight.getDeviceId()
   return core and core.deviceId or nil
 end
 
 --- Which way requests are being sent ("https", "winhttp", "libcurl",
---- "curl"), or nil before the worker has reported or when none works.
+--- "curl", "web"), or nil before the worker has reported or when none works.
 function ravensight.getTransport()
   return transportName
 end
@@ -325,13 +370,14 @@ end
 --- events_flushed(count), flush_failed(reason), feedback_submitted,
 --- feedback_failed(reason), event_tracked(name, data).
 function ravensight.on(name, fn)
-  assert(core, 'ravensight.on: call ravensight.init() first')
+  assert(initialized, 'ravensight.on: call ravensight.init() first')
+  if not core then return function() end end
   return core:on(name, fn)
 end
 
 --- Switch into playtest mode by hand. Normally read from the environment.
 function ravensight.setPlaytestContext(ctx)
-  if core then core:setPlaytestContext(ctx) end
+  if core and core.setPlaytestContext then core:setPlaytestContext(ctx) end
 end
 
 return ravensight

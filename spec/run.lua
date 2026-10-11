@@ -1,10 +1,11 @@
 -- A dependency-free test runner: `luajit spec/run.lua` from the repo root.
+-- The love.js bridge has its own Node test: `node --test web`.
 -- Each spec file returns a list of {name, fn}; a failing assert fails the
 -- test, and the process exits non-zero if any test failed.
 
 package.path = './?.lua;./?/init.lua;' .. package.path
 
-local files = { 'spec/json_spec.lua', 'spec/transport_spec.lua', 'spec/core_spec.lua' }
+local files = { 'spec/json_spec.lua', 'spec/transport_spec.lua', 'spec/core_spec.lua', 'spec/init_spec.lua' }
 local passed, failed = 0, 0
 
 for _, file in ipairs(files) do

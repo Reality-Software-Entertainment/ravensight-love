@@ -337,3 +337,36 @@ test('outside a browser no listener is registered and nothing throws', () => {
   const { rs } = fakeRs();
   assert.doesNotThrow(() => installRavensightBridge(rs, fakeModule().Module, { storage: memoryStorage() }));
 });
+
+test('page side: an opted-out page stays off when the game prints no start line', () => {
+  // opt_out page remembered "false"; the game has no saved choice, so its
+  // web core prints nothing at start and the page's storage governs.
+  const storage = memoryStorage();
+  storage.setItem(ENABLED_KEY, 'false');
+  assert.equal(ravensightLoveEnabled(storage), false, 'the page constructs its SDK switched off');
+  const { rs, calls } = fakeRs();
+  rs.initialized = false;
+  rs.init = () => { calls.push(['init']); };
+  const win = fakeWindow();
+  const { Module } = fakeModule();
+  Module.FS = fakeFS(JSON.stringify([{ event: 'a' }]));
+  installRavensightBridge(rs, Module, { storage, window: win });
+  Module.print(line({ v: 1, op: 'track', event: 'level_start', data: {} }));
+  win.dispatch('pagehide');
+  assert.equal(storage.data.get(ENABLED_KEY), 'false', 'still off');
+  assert.ok(!calls.some((c) => c[0] === 'init' || (c[0] === 'setEnabled' && c[1] === true)), 'never switched back on');
+  assert.ok(!calls.some((c) => c[0] === 'track' && c[1] === 'a'), 'no mailbox send while off');
+});
+
+test('page side, opt_in: the game start line false wins over a page that remembered yes', () => {
+  const storage = memoryStorage();
+  storage.setItem(ENABLED_KEY, 'true');
+  const { rs, calls } = fakeRs();
+  const { Module } = fakeModule();
+  installRavensightBridge(rs, Module, { storage, consent: 'opt_in' });
+  // No ravensight_optin on the game side: the conservative start line.
+  Module.print(line({ v: 1, op: 'enabled', value: false }));
+  assert.deepEqual(calls, [['setEnabled', false]]);
+  assert.equal(storage.data.get(ENABLED_KEY), 'false');
+  assert.equal(ravensightLoveEnabled(storage, { consent: 'opt_in' }), false);
+});

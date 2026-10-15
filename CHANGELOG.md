@@ -12,9 +12,11 @@ changes listed first.
   than the tracking switch and a refused playtest token) now stops the SDK
   for the rest of the run, with `tracking_disabled("key")`, instead of
   retrying forever. The queue is cleared and nothing is saved on quit.
-- In a web build the Lua SDK now prints an `enabled` line at every start,
-  with the player's saved choice, not only after an opt-out. The page's SDK
-  is switched to match the game's saved choice.
+- In a web build with the default consent, the start line is unchanged: a
+  saved opt-out is passed as `enabled` false, and with no saved choice
+  nothing is printed. With `consent = "opt_in"` the start always prints
+  one `enabled` line: true only when `ravensight_optin` exists, false
+  otherwise. A start line never switches an opted-out page back on.
 - Every event's data gains an `rs_event_id` key.
 - Retry waits carry plus or minus 20 percent jitter. `Retry-After` is still
   obeyed exactly.

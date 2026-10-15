@@ -68,15 +68,19 @@ event over 8,192 bytes, never printed) fire in a web build;
 reasons and `feedback_submitted` belong to the page's SDK and never fire in
 Lua there.
 
-A player's choice on the web: at every start the Lua SDK prints one
-`enabled` line with the choice saved in the game's own save folder, and
-`setTrackingEnabled` prints another whenever it changes, which switches the
-page's SDK on or off at once. The bridge remembers the choice in the page's
+A player's choice on the web: `setTrackingEnabled` prints an `enabled` line
+whenever the choice changes, which switches the page's SDK on or off at
+once. At start, a line is printed only when it cannot switch an opted-out
+page back on: with the default consent, only a saved opt-out is passed
+(`enabled` false), and with no saved choice nothing is printed and the
+page's own storage decides; with `consent = "opt_in"`, `enabled` true is
+passed only when the game saved a yes (`ravensight_optin`), and `enabled`
+false otherwise, even if the page remembered a yes. The bridge remembers the choice in the page's
 `localStorage` (`ravensight.love.enabled`). On the next visit,
 `ravensightLoveEnabled()` reads it before the page's SDK is constructed, so an
 opted-out player opens no session and sends no `game_started`. Where
 `localStorage` is blocked, the choice still holds for that visit, and the
-game's own saved choice switches the page to match once the game has loaded.
+game's own saved opt-out switches the page off again once the game has loaded.
 A player who opts back in through the game is counted again from that moment,
 and the bridge starts the page's SDK if it never started, but there is no
 `game_started` for that visit: the page's SDK sends it only when it is
@@ -102,7 +106,7 @@ needs in a web build:
 |---|---|---|---|
 | 0.1.0 | None. A love.js build cannot send requests from Lua. | Not applicable | Games wrote their own print bridge to the JavaScript SDK. |
 | 0.2.0 | `web/ravensight-love-bridge.js` | 0.4.0 | The bridge calls `rs.track`, `rs.submitFeedback`, `rs.setEnabled`, `rs.flush` and `rs.init`, all present in 0.4.0. 0.4.0 is the floor because the Lua SDK sends no `game_started` or `game_exited` on the web, and the JavaScript SDK sends them itself only from 0.4.0 (`autoEvents`). 0.4.0 also makes `init()` on an opted-out client open no session, which the remembered opt-out relies on. |
-| 0.3.0 | `web/ravensight-love-bridge.js` | 0.4.0 | No new call on the page's SDK is required. The exit mailbox uses `rs.flushOnHidden()` or `rs._flushOnHidden()` when the SDK has one, and `rs.flush()` otherwise, so 0.4.0 still works. An opt-in page constructs its SDK with `enabled: false` and the bridge calls `rs.init()` on the player's yes, which 0.4.0 already supports. |
+| 0.3.0 | `web/ravensight-love-bridge.js` | 0.4.0 | No new call on the page's SDK is required. After the exit mailbox, the bridge calls `rs.flushOnHidden()` if it exists, else `rs._flushOnHidden()`, else `rs.flush()`. ravensight-js 0.4.x has the internal `_flushOnHidden` and no public `flushOnHidden` yet, so on 0.4.x the bridge calls `_flushOnHidden`. An opt-in page constructs its SDK with `enabled: false` and the bridge calls `rs.init()` on the player's yes, which 0.4.0 already supports. |
 
 Nothing in ravensight-love 0.2.0 or 0.3.0 needs the 0.4.1 additions (`rs.session()`
 and `rs.sessionTokenFor()`), so 0.4.0 or newer is enough. The bridge does not

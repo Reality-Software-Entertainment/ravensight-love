@@ -15,9 +15,10 @@
 -- lifecycle events (game_started and game_exited), so none of them happen
 -- here. Keys come out sorted, since the SDK's JSON encoder sorts them.
 --
--- At start the player's saved choice is always passed to the page as one
--- `enabled` line, so with consent = "opt_in" a page that started switched
--- off stays off until the player says yes in the game.
+-- At start: with consent = "opt_in" the game's saved choice always goes to
+-- the page as one `enabled` line (false unless ravensight_optin exists);
+-- with the default opt_out only a saved opt-out does. A start line never
+-- switches an opted-out page back on.
 --
 -- MIT licensed, part of ravensight-love.
 
@@ -86,13 +87,18 @@ function Web:send(message)
   self.print(Web.TAG .. json.encode(message))
 end
 
---- Reads the player's saved choice and always tells the page, so the page
---- SDK is switched on or off to match before the first event.
+--- Reads the player's saved choice and tells the page only what can never
+--- switch an opted-out page back on. opt_out: a saved opt-out is passed as
+--- enabled false; with no file nothing is printed and the page's own
+--- storage governs. opt_in: enabled true only when ravensight_optin exists,
+--- and enabled false otherwise, even if the page's storage says yes.
 function Web:start()
   self.log('info', 'transport web (bridge to ravensight-js)')
   self.startTime = self.time()
   self.trackingEnabled = Core.savedChoice(self.storage, self.consent)
-  self:send({ op = 'enabled', value = self.trackingEnabled })
+  if self.consent == Core.CONSENT_OPT_IN or not self.trackingEnabled then
+    self:send({ op = 'enabled', value = self.trackingEnabled })
+  end
 end
 
 local function shallowCopy(t)

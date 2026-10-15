@@ -24,6 +24,13 @@ local function boot(os, files)
   w.realPrint = print
   _G.print = function(line) table.insert(w.lines, line) end
   w.sdk = require('ravensight')
+  -- Counts the tagged lines init printed, so w.after() can check them.
+  local realInit = w.sdk.init
+  w.sdk.init = function(...)
+    local result = realInit(...)
+    w.startOps = #w.ops()
+    return result
+  end
   function w.done()
     _G.print = w.realPrint
     _G.love = nil
@@ -37,11 +44,18 @@ local function boot(os, files)
     end
     return out
   end
-  --- The tagged lines after the one `enabled` line every web start prints.
-  function w.after()
+  --- The tagged lines after init. With no argument, asserts init printed
+  --- none (opt_out with no saved choice); with true or false, asserts it
+  --- printed exactly one `enabled` line with that value, and skips it.
+  function w.after(startValue)
     local ops = w.ops()
-    assert(ops[1] and ops[1].op == 'enabled', 'a web start prints its enabled line first')
-    table.remove(ops, 1)
+    if startValue == nil then
+      eq(w.startOps or 0, 0, 'no start line without a saved choice')
+    else
+      eq(w.startOps, 1, 'one start line')
+      eq(ops[1].op, 'enabled'); eq(ops[1].value, startValue)
+      table.remove(ops, 1)
+    end
     return ops
   end
   return w
@@ -61,7 +75,7 @@ return {
       eq(result.sessionReady, false); eq(result.reason, 'web_bridge')
       eq(w.sdk.getTransport(), 'web')
       eq(w.lines[1], 'Ravensight: transport web (bridge to ravensight-js)')
-      eq(w.lines[2], '__RAVENSIGHT__ {"op":"enabled","v":1,"value":true}', 'the saved choice goes to the page')
+      eq(#w.lines, 1, 'no start line: no saved choice, so the page decides')
       eq(#w.after(), 0, 'no game_started from Lua in a web build')
     end)
   end },
@@ -69,9 +83,9 @@ return {
     run(nil, nil, function(w)
       w.sdk.init({ ingestKey = 'gt_live_k', transport = 'web' })
       w.sdk.track('level_start', { level = 'forest_1', n = 2 })
-      eq(#w.lines, 2)
-      assert(w.lines[2]:sub(1, 15) == '__RAVENSIGHT__ ', w.lines[2])
-      assert(not w.lines[2]:find('\n'), 'one line')
+      eq(#w.lines, 1)
+      assert(w.lines[1]:sub(1, 15) == '__RAVENSIGHT__ ', w.lines[1])
+      assert(not w.lines[1]:find('\n'), 'one line')
       local op = w.after()[1]
       eq(op.v, 1); eq(op.op, 'track'); eq(op.event, 'level_start')
       eq(op.data.level, 'forest_1'); eq(op.data.n, 2)
@@ -109,7 +123,7 @@ return {
   { 'a saved web opt-out is passed to the page at start', function()
     run('Web', { ravensight_optout = '1' }, function(w)
       w.sdk.init({ ingestKey = 'gt_live_k' })
-      eq(w.ops()[1].op, 'enabled'); eq(w.ops()[1].value, false)
+      eq(#w.after(false), 0)
     end)
   end },
   { 'web update, flush and quit never error, and flush prints its line', function()
@@ -272,7 +286,7 @@ return {
     local files = {}
     run('Web', files, function(w)
       w.sdk.init({ consent = 'opt_in' })
-      eq(w.ops()[1].op, 'enabled'); eq(w.ops()[1].value, false)
+      eq(#w.after(false), 0, 'opt_in with no saved yes: told off')
       eq(w.sdk.enabled(), false)
       w.sdk.track('ignored', {})
       eq(#w.ops(), 1)
@@ -285,7 +299,7 @@ return {
     end)
     run('Web', files, function(w)
       w.sdk.init({ consent = 'opt_in' })
-      eq(w.ops()[1].value, true, 'the yes is remembered')
+      eq(#w.after(true), 0, 'the yes is remembered and passed on')
     end)
   end },
   { 'web: an event over 8,192 bytes is not printed', function()

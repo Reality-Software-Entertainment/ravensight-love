@@ -63,7 +63,7 @@ none there. `init()` returns
 on the page's SDK instead. Of the SDK events, only `event_tracked`,
 `tracking_disabled`, `feedback_failed` (for a refusal before sending, such
 as `"invalid_category"`) and `flush_failed` with `"event_too_large"` (an
-event over 8,192 bytes, never printed) fire in a web build;
+event whose data is over 8,192 bytes, never printed) fire in a web build;
 `session_ready`, `session_failed`, `events_flushed`, other `flush_failed`
 reasons and `feedback_submitted` belong to the page's SDK and never fire in
 Lua there.
@@ -219,14 +219,18 @@ not use these options.
   `setTrackingEnabled(false)` removes it. The default, `"opt_out"`, keeps the
   0.2.0 behaviour. `setTrackingEnabled` and `isTrackingEnabled` save and
   report the choice even while inert or with `enabled = false`, so the
-  settings toggle always shows the right state.
+  settings toggle always shows the right state. Events tracked before the
+  yes are discarded, not held for later; events tracked right after it are
+  queued while the settings check runs. `getDeviceId()` is `nil` before
+  the first yes. Saying no again stops everything but keeps the device id
+  in the save folder; to forget it too, call `resetDeviceId()`.
 - **`distribution`** is a short label of your own, such as
   `"native-release"`, `"web-pages"` or `"web-itch"`, sent on the session so
   you can tell builds apart. It is not sent when unset. In a web build the
   page's SDK opens the session, so this option has no effect there.
 - **`rs_event_id`** is added to every event's data: the first 16 characters
   of the device id (on the web, a random value made once per launch), the
-  start time in hex, a random 4 hex character value made once per launch
+  start time in hex, a random 8 hex character value made once per launch
   and a counter. It is saved with a queued event, so an event sent again
   after a restart carries the same id and can be recognised as the same
   event.
@@ -235,12 +239,16 @@ not use these options.
   playtest token) means the key was revoked, rotated or is wrong, and a
   retry cannot help. The SDK then stops for the rest of the run: tracking
   off, queue cleared, nothing saved on quit, one error line, and
-  `tracking_disabled` fires with `"key"`.
+  `tracking_disabled` fires with `"key"`. A later `setTrackingEnabled(true)`
+  still saves the player's choice, but restarts nothing in that process;
+  the next launch tries the key again.
 - **Jitter.** A failed request is retried after the backoff plus or minus
   20 percent, so many copies of a game that lost the network together do
   not come back together. Never sooner than half a second, never later than
   5 minutes. A server's `Retry-After` is obeyed exactly.
-- **Events over 8,192 bytes** (as JSON) are dropped before they are queued,
+- **Events whose data is over 8,192 bytes** as JSON (the size the server
+  checks; the event name and timestamp are not counted) are dropped before
+  they are queued,
   with one warning line for the run and `flush_failed` with
   `"event_too_large"` for each one.
 - **The quit hold** is unchanged: `ravensight.quit()` holds the quit for up
@@ -289,7 +297,11 @@ end
 ```
 
   On `pagehide` the bridge reads it through `Module.FS` (when present),
-  tracks each entry, removes the file and asks the page's SDK to flush. Its
+  empties it (removes the file, or writes `[]` back), so it is sent at most
+  once, tracks each entry and asks the page's SDK to flush, passing the
+  size of the batch already in flight so those events are not sent twice.
+  A mailbox over 64 KB is discarded unread, and at most 200 entries are
+  sent. Its
   listener uses the capture phase so it runs before the SDK's own `pagehide`
   handling, which still sends `game_exited` as before. Nothing is sent from
   the mailbox while the player has tracking off. It is best effort and never
@@ -327,7 +339,7 @@ end
 | `isTrackingEnabled()` | `false` when the player opted out (or has not opted in), or tracking is switched off for your game. While inert or with `enabled = false`, the player's saved choice. |
 | `enabled()` | `true` only while the SDK is running and collecting. `false` when inert, with `enabled = false`, opted out, switched off by the server or after a refused key. |
 | `resetDeviceId()` | Start a fresh analytics identity for this install. |
-| `getDeviceId()` | This install's random id. |
+| `getDeviceId()` | This install's random id. `nil` while inert, in a web build, and with `consent = "opt_in"` before the first yes. |
 | `setPlaytestContext(ctx)` | Puts a running game into playtest mode. `ctx` needs `token` and `run_id` (plus optional `persona`, `job_id` and `tier`), the same values the playtest CLI passes as `RAVENSIGHT_PLAYTEST_*` variables; it uses a throwaway device id, ignores the player's opt-out, and tags every event as synthetic. `init` already does this when those variables are set, so a game never needs to call it by hand. |
 | `getTransport()` | How requests are sent here, or `nil` if nothing works. |
 | `on(event, fn)` | Listen for an SDK event. Returns a function that stops listening. |
@@ -342,10 +354,10 @@ end
 | `session_failed` | `reason` | Opening a session failed. It is retried for you. |
 | `tracking_disabled` | `source` | `"server"` when tracking is switched off for your game, `"player"` after an opt-out (or at start with `consent = "opt_in"` before a yes), `"key"` when the key was refused and the run stops. |
 | `events_flushed` | `count` | A batch was accepted. |
-| `flush_failed` | `reason` | A batch failed. It is retried for you. `"event_too_large"`: one event was over 8,192 bytes and was dropped, not retried. |
+| `flush_failed` | `reason` | A batch failed. It is retried for you. `"event_too_large"`: one event's data was over 8,192 bytes as JSON and the event was dropped, not retried. |
 | `feedback_submitted` | | Feedback was accepted. |
 | `feedback_failed` | `reason` | Feedback failed, including `"no_session"` when sent too early, `"invalid_category"` and `"invalid_rating"`. |
-| `event_tracked` | `name, data` | Every queued event, with the data actually queued. |
+| `event_tracked` | `name, data` | Every queued event, with the data actually queued: a copy of yours, carrying `rs_event_id` (and the playtest tags in a playtest run). Changing it does not change the queued event's data in your table. |
 
 ```lua
 ravensight.on("tracking_disabled", function(source)
@@ -425,7 +437,8 @@ launch. `getTransport()` tells you which one is in use.
   is obeyed exactly.
 - A refused key (401 or 403 on the settings check or the session) stops the
   SDK for the rest of the run instead of retrying.
-- An event over 8,192 bytes as JSON is dropped before it is queued.
+- An event whose data is over 8,192 bytes as JSON is dropped before it is
+  queued.
 - If the server rejects one oversized event, the batch is split until that
   event is found and dropped, so it never costs the events around it.
 - Events still unsent when the game quits are saved and sent on the next
@@ -459,7 +472,7 @@ synthetic, so persona sessions never mix with real players.
 ```
 luajit spec/run.lua                 # the Lua test suite, no LÖVE needed
 node --test web/bridge.test.mjs     # the love.js bridge, Node 20 or newer
-love example                        # a small game that uses the SDK
+love example                        # a small game that uses the SDK (inert unless RAVENSIGHT_INGEST_KEY is set)
 ```
 
 ## License

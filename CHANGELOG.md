@@ -20,9 +20,14 @@ changes listed first.
 - Every event's data gains an `rs_event_id` key.
 - Retry waits carry plus or minus 20 percent jitter. `Retry-After` is still
   obeyed exactly.
-- An event over 8,192 bytes as JSON is dropped before it is queued, with
-  one warning line and `flush_failed("event_too_large")`, instead of being
-  sent and split out by the server's 400.
+- An event whose data is over 8,192 bytes as JSON (what the server
+  measures) is dropped before it is queued, with one warning line for the
+  run and `flush_failed("event_too_large")` for each, instead of being sent
+  and split out by the server's 400.
+- `event_tracked` listeners receive a copy of the data carrying
+  `rs_event_id`, never the caller's own table.
+- A refused key ends the run; a later `setTrackingEnabled(true)` saves the
+  choice but restarts nothing in that process.
 
 ### What is new
 
@@ -34,11 +39,14 @@ changes listed first.
 - **`ravensight.enabled()`**, true only while the SDK is collecting.
 - **`consent = "opt_in"`**: no device id, saved queue or settings check
   before `setTrackingEnabled(true)`; the yes is saved as
-  `ravensight_optin`. `"opt_out"` stays the default.
+  `ravensight_optin`. `"opt_out"` stays the default. Events tracked before
+  the yes are discarded; events right after it are queued while the
+  settings check runs. `getDeviceId()` is `nil` before the first yes.
+  Saying no again keeps the device id; `resetDeviceId()` forgets it.
 - **`distribution`** option, sent on the session body when set.
 - **`rs_event_id`** on every event: the first 16 characters of the device id
-  (a per-launch random value on the web), the start time in hex, a
-  per-launch nonce and a counter. It is kept inside the event's data, so a
+  (a per-launch random value on the web), the start time in hex, an 8 hex
+  character per-launch nonce and a counter. It is kept inside the event's data, so a
   saved queue resends the same id.
 - `setTrackingEnabled` and `isTrackingEnabled` save and report the choice
   in the file the consent mode reads, also while inert or with
@@ -48,12 +56,15 @@ changes listed first.
   and the bridge's `consent` option for opt-in pages; false when storage
   is missing or blocked. Tagged lines over 32 KB print as ordinary lines.
   The exit mailbox: a game's adapter keeps `/tmp/ravensight-exit.json`, and
-  the bridge tracks it on `pagehide` and flushes before the page's SDK sends
-  its own `game_exited`.
+  the bridge tracks it on `pagehide` (at most 64 KB and 200 entries, sent
+  once) and flushes, skipping the batch already in flight, before the
+  page's SDK sends its own `game_exited`.
 - Tests pin the exact keys of every request body and header, and check
   that no file path, host name or command line argument is sent.
 - README: "Public builds", and the compatibility row for 0.3.0 (the
   JavaScript SDK floor stays 0.4.0).
+- The example game reads its key only from `RAVENSIGHT_INGEST_KEY`, and is
+  inert without it.
 
 ## 0.2.0
 

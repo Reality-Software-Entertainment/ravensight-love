@@ -39,8 +39,8 @@ Core.DEFAULT_FLUSH_INTERVAL_SECONDS = 2
 Core.DEFAULT_MAX_QUEUE_SIZE = 500
 Core.MIN_RETRY_SECONDS = 0.5
 Core.JITTER = 0.2
---- The largest event the API accepts, measured as the JSON of
---- {event, data, timestamp}. Bigger events are dropped before queueing.
+--- The largest event the API accepts, measured as the server measures it:
+--- the JSON of the event's data. Bigger events are dropped before queueing.
 Core.MAX_EVENT_BYTES = 8192
 
 --- The categories the feedback endpoint accepts. Anything else is refused
@@ -87,9 +87,9 @@ function Core.eventId(deviceId, startTime, nonce, counter)
   return string.format('%s-%x-%s-%d', tostring(deviceId or ''):sub(1, 16), math.floor(tonumber(startTime) or 0), nonce, counter)
 end
 
---- The serialized size of one queued event, as the batch will send it.
-function Core.eventBytes(name, data, timestamp)
-  return #json.encode({ event = name, data = data, timestamp = timestamp })
+--- The serialized size of an event's data, as the server measures it.
+function Core.eventBytes(data)
+  return #json.encode(data)
 end
 
 local EVENTS = {
@@ -321,11 +321,13 @@ end
 
 function Core:checkServerSettings()
   if self.keyRefused then return end
+  self.settingsPending = true
   self.send({
     method = 'GET',
     url = self.apiUrl .. '/api/v1/settings',
     headers = { ['X-API-Key'] = self.ingestKey },
   }, function(status, body)
+    self.settingsPending = false
     if self.keyRefused then return end
     if status == 200 then
       local parsed = json.decode(body or '')
@@ -488,7 +490,8 @@ function Core:track(name, data)
     -- Batched: update() sends once flushInterval has passed since the first
     -- waiting event, or now when a full request's worth is waiting.
     if #self.pending >= Core.MAX_BATCH_SIZE then self:flushPending() end
-  elseif not self.sessionPending and not self.playtestBlocked then
+  elseif not self.sessionPending and not self.playtestBlocked and not self.settingsPending then
+    -- While the settings check is out, its answer opens the session.
     self:startSession()
   end
 end
@@ -502,7 +505,7 @@ end
 --- The next rs_event_id: unique per event, and kept inside the event's data
 --- so a saved and reloaded queue resends the same id.
 function Core:nextEventId()
-  if not self.eventNonce then self.eventNonce = self.randomHex(2) end
+  if not self.eventNonce then self.eventNonce = self.randomHex(4) end
   self.eventCounter = self.eventCounter + 1
   return Core.eventId(self.deviceId, self.startTime or self.time(), self.eventNonce, self.eventCounter)
 end
@@ -516,7 +519,7 @@ function Core:enqueue(name, data)
   end
   eventData.rs_event_id = self:nextEventId()
   local timestamp = self.time()
-  if Core.eventBytes(name, eventData, timestamp) > Core.MAX_EVENT_BYTES then
+  if Core.eventBytes(eventData) > Core.MAX_EVENT_BYTES then
     if not self.warnedTooLarge then
       self.warnedTooLarge = true
       self.log('warn', 'dropped event "' .. name .. '": larger than ' .. Core.MAX_EVENT_BYTES .. ' bytes as JSON (further drops are not logged)')
@@ -702,6 +705,9 @@ function Core:setTrackingEnabled(enabled)
       self.log('info', 'the choice is saved; the key was refused, so nothing is sent this run')
       return
     end
+    -- Collect from this moment, so events tracked right after the yes are
+    -- queued; the settings answer clears them if the server says no.
+    self.trackingEnabled = self.serverTrackingEnabled
     self:checkServerSettings()
   end
 end

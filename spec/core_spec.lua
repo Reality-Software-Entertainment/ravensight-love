@@ -610,7 +610,7 @@ return {
     eq(caller.rs_event_id, nil)
     h.openSession()
     local events = h.batchBody(h.answer('/api/v1/track/batch', 202))
-    local prefix = string.rep('ab', 8) .. '-' .. string.format('%x', 1800000000) .. '-abab-'
+    local prefix = string.rep('ab', 8) .. '-' .. string.format('%x', 1800000000) .. '-abababab-'
     eq(events[1].data.rs_event_id, prefix .. '1', 'game_started')
     eq(events[2].data.rs_event_id, prefix .. '2')
     eq(events[3].data.rs_event_id, prefix .. '3')
@@ -657,12 +657,13 @@ return {
     for _, line in ipairs(h.logs) do if line:find('dropped event "huge"', 1, true) then warnings = warnings + 1 end end
     eq(failures, 2); eq(warnings, 1)
     -- Just under the limit is kept.
-    local name, data = 'fits', { blob = '' }
-    data.rs_event_id = Core.eventId(h.core.deviceId, h.core.startTime, 'abab', 4)
-    local room = Core.MAX_EVENT_BYTES - Core.eventBytes(name, data, 1800000000)
-    h.core:track(name, { blob = string.rep('y', room) })
+    -- The data alone is measured, as the server does.
+    local data = { blob = '' }
+    data.rs_event_id = Core.eventId(h.core.deviceId, h.core.startTime, 'abababab', 4)
+    local room = Core.MAX_EVENT_BYTES - Core.eventBytes(data)
+    h.core:track('a_long_event_name_that_the_server_does_not_count', { blob = string.rep('y', room) })
     eq(#h.core.pending, 2)
-    eq(Core.eventBytes('fits', h.core.pending[2].data, 1800000000), Core.MAX_EVENT_BYTES)
+    eq(Core.eventBytes(h.core.pending[2].data), Core.MAX_EVENT_BYTES)
   end },
 
   -- ------------------------------------------ 0.3.0: what leaves, exactly
@@ -703,5 +704,29 @@ return {
     eq(feedback.url, 'https://api.test/api/v1/feedback')
     eq(keys(feedback.headers), 'Content-Type,X-Session-Token')
     eq(keys(json.decode(feedback.body)), 'category,message,rating')
+  end },
+  { 'opt_in: events tracked right after the yes are queued, before the settings answer', function()
+    local h = harness({ consent = 'opt_in' })
+    h.core:start()
+    h.core:setTrackingEnabled(true)
+    eq(h.core:isTrackingEnabled(), true)
+    h.core:track('tutorial_started', {})
+    eq(#h.core.pending, 1, 'queued')
+    eq(#h.requests, 1, 'only the settings check is out: no session before its answer')
+    h.answer('/api/v1/settings', 200, { trackingEnabled = true })
+    h.openSession()
+    local names = {}
+    for _, e in ipairs(h.batchBody(h.answer('/api/v1/track/batch', 202))) do names[#names + 1] = e.event end
+    eq(table.concat(names, ','), 'tutorial_started,game_started')
+  end },
+  { 'opt_in: the server saying no after the yes clears what was queued', function()
+    local h = harness({ consent = 'opt_in' })
+    h.core:start()
+    h.core:setTrackingEnabled(true)
+    h.core:track('tutorial_started', {})
+    h.answer('/api/v1/settings', 200, { trackingEnabled = false })
+    eq(#h.core.pending, 0)
+    eq(h.core:isTrackingEnabled(), false)
+    eq(#h.requests, 0)
   end },
 }

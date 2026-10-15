@@ -112,7 +112,7 @@ end
 function Web:nextEventId()
   if not self.launchId then
     self.launchId = self.randomHex(8)
-    self.eventNonce = self.randomHex(2)
+    self.eventNonce = self.randomHex(4)
   end
   self.eventCounter = self.eventCounter + 1
   return Core.eventId(self.launchId, self.startTime or self.time(), self.eventNonce, self.eventCounter)
@@ -127,7 +127,7 @@ function Web:track(name, data)
   data = shallowCopy(data or {})
   data.rs_event_id = self:nextEventId()
   local timestamp = self.time() * 1000
-  if Core.eventBytes(name, data, timestamp) > Core.MAX_EVENT_BYTES then
+  if Core.eventBytes(data) > Core.MAX_EVENT_BYTES then
     if not self.warnedTooLarge then
       self.warnedTooLarge = true
       self.log('warn', 'dropped event "' .. name .. '": larger than ' .. Core.MAX_EVENT_BYTES .. ' bytes as JSON (further drops are not logged)')

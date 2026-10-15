@@ -89,7 +89,7 @@ return {
       local op = w.after()[1]
       eq(op.v, 1); eq(op.op, 'track'); eq(op.event, 'level_start')
       eq(op.data.level, 'forest_1'); eq(op.data.n, 2)
-      assert(op.data.rs_event_id:match('^%x+%-%x+%-%x%x%x%x%-1$'), op.data.rs_event_id)
+      assert(op.data.rs_event_id:match('^%x+%-%x+%-%x%x%x%x%x%x%x%x%-1$'), op.data.rs_event_id)
       eq(type(op.timestamp), 'number')
       assert(op.timestamp > 1e12, 'timestamp is in milliseconds')
     end)

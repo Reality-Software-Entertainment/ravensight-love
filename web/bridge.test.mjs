@@ -1,7 +1,9 @@
 // node --test web/bridge.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { installRavensightBridge, ravensightLoveEnabled, ENABLED_KEY, TAG } from './ravensight-love-bridge.js';
+import {
+  installRavensightBridge, ravensightLoveEnabled, ENABLED_KEY, TAG, MAX_LINE_LENGTH, EXIT_MAILBOX_PATH,
+} from './ravensight-love-bridge.js';
 
 function fakeRs({ withFeedback = true } = {}) {
   const calls = [];
@@ -87,9 +89,11 @@ test('without a print of its own, Module falls back to console.log', (t) => {
   assert.deepEqual(log.mock.calls[0].arguments, ['plain']);
 });
 
-test('refuses a missing client or Module', () => {
-  assert.throws(() => installRavensightBridge(null, {}), TypeError);
+test('refuses a client that is not one, or a missing Module', () => {
+  // 0.3.0: a null client is the documented sink (below), not an error.
+  assert.throws(() => installRavensightBridge({}, {}), TypeError);
   assert.throws(() => installRavensightBridge(fakeRs().rs, null), TypeError);
+  assert.throws(() => installRavensightBridge(null, null), TypeError);
 });
 
 function memoryStorage() {
@@ -143,4 +147,193 @@ test('blocked storage does not stop the opt-out reaching the SDK', () => {
   installRavensightBridge(rs, Module, { storage: throwingStorage });
   Module.print(line({ v: 1, op: 'enabled', value: false }));
   assert.deepEqual(calls, [['setEnabled', false]]);
+});
+
+// ------------------------------------------------------------- 0.3.0
+
+test('a null client is a sink: tagged lines vanish, other output prints, nothing throws', () => {
+  const { Module, printed } = fakeModule();
+  assert.equal(installRavensightBridge(null, Module), Module);
+  Module.print(line({ v: 1, op: 'track', event: 'level_start', data: {} }));
+  Module.print(line({ v: 1, op: 'enabled', value: true }));
+  Module.print('__RAVENSIGHT__ {not json');
+  Module.print('hello from the game');
+  Module.print('two', 'args');
+  assert.deepEqual(printed, ['hello from the game', 'two']);
+  assert.doesNotThrow(() => installRavensightBridge(undefined, fakeModule().Module));
+});
+
+test('the sink touches no storage and registers no pagehide listener', () => {
+  const storage = memoryStorage();
+  const win = fakeWindow();
+  const { Module } = fakeModule();
+  installRavensightBridge(null, Module, { storage, window: win, consent: 'opt_in' });
+  Module.print(line({ v: 1, op: 'enabled', value: true }));
+  assert.equal(storage.data.size, 0);
+  assert.equal(win.listeners.length, 0);
+});
+
+test('opt_in: ravensightLoveEnabled is true only after a remembered yes', () => {
+  const storage = memoryStorage();
+  const optIn = { consent: 'opt_in' };
+  assert.equal(ravensightLoveEnabled(storage, optIn), false, 'nothing remembered');
+  storage.setItem(ENABLED_KEY, 'false');
+  assert.equal(ravensightLoveEnabled(storage, optIn), false);
+  storage.setItem(ENABLED_KEY, 'true');
+  assert.equal(ravensightLoveEnabled(storage, optIn), true);
+  assert.equal(ravensightLoveEnabled(throwingStorage, optIn), false, 'storage that throws');
+  assert.equal(ravensightLoveEnabled(null, optIn), false, 'no storage');
+  // The default mode is unchanged.
+  assert.equal(ravensightLoveEnabled(null), true);
+  assert.equal(ravensightLoveEnabled(memoryStorage(), {}), true);
+});
+
+test('opt_in: the bridge records the same default and follows the enabled lines', () => {
+  const { rs, calls } = fakeRs();
+  const { Module } = fakeModule();
+  const storage = memoryStorage();
+  const win = fakeWindow();
+  const FS = fakeFS(JSON.stringify([{ event: 'run_abandoned', data: { sector: 2 } }]));
+  Module.FS = FS;
+  installRavensightBridge(rs, Module, { storage, consent: 'opt_in', window: win });
+  win.dispatch('pagehide');
+  assert.deepEqual(calls, [], 'nothing before a yes, not even the mailbox');
+  Module.print(line({ v: 1, op: 'enabled', value: true }));
+  assert.equal(storage.data.get(ENABLED_KEY), 'true');
+  assert.equal(ravensightLoveEnabled(storage, { consent: 'opt_in' }), true);
+  calls.length = 0;
+  win.dispatch('pagehide');
+  assert.deepEqual(calls, [['track', 'run_abandoned', { sector: 2 }], ['flush']]);
+});
+
+test('a tagged line over 32 KB goes to the original print, unparsed', () => {
+  const { rs, calls } = fakeRs();
+  const { Module, printed } = fakeModule();
+  installRavensightBridge(rs, Module);
+  const big = line({ v: 1, op: 'track', event: 'big', data: { blob: 'x'.repeat(MAX_LINE_LENGTH) } });
+  assert.ok(big.length > MAX_LINE_LENGTH);
+  Module.print(big);
+  assert.deepEqual(calls, []);
+  assert.deepEqual(printed, [big]);
+  const fits = TAG + JSON.stringify({ v: 1, op: 'flush', pad: 'p'.repeat(MAX_LINE_LENGTH - TAG.length - 30) });
+  assert.ok(fits.length <= MAX_LINE_LENGTH);
+  Module.print(fits);
+  assert.deepEqual(calls, [['flush']]);
+});
+
+// A window whose dispatch runs capture listeners first, as a browser does
+// for listeners on the target itself.
+function fakeWindow() {
+  const listeners = [];
+  return {
+    listeners,
+    addEventListener(type, fn, opts) {
+      const capture = opts === true || Boolean(opts && opts.capture);
+      listeners.push({ type, fn, capture });
+    },
+    dispatch(type) {
+      const event = { type };
+      for (const l of listeners) if (l.type === type && l.capture) l.fn(event);
+      for (const l of listeners) if (l.type === type && !l.capture) l.fn(event);
+    },
+  };
+}
+
+function fakeFS(text) {
+  const files = new Map();
+  if (text !== undefined) files.set(EXIT_MAILBOX_PATH, text);
+  return {
+    files,
+    readFile(path, opts) {
+      assert.deepEqual(opts, { encoding: 'utf8' });
+      if (!files.has(path)) { const e = new Error('ENOENT'); e.code = 'ENOENT'; throw e; }
+      return files.get(path);
+    },
+    unlink(path) { files.delete(path); },
+  };
+}
+
+test('exit mailbox: tracked from Module.FS in a capture listener, before the SDK flush and its own pagehide', () => {
+  const { rs, calls } = fakeRs();
+  const win = fakeWindow();
+  // The page SDK registered its own pagehide handler first, without capture.
+  win.addEventListener('pagehide', () => calls.push(['sdk pagehide: game_exited']));
+  const { Module } = fakeModule();
+  Module.FS = fakeFS(JSON.stringify([
+    { event: 'run_abandoned', data: { sector: 3 } },
+    { event: 'session_ended' },
+    { nope: true },
+    { event: '' },
+  ]));
+  installRavensightBridge(rs, Module, { window: win, storage: memoryStorage() });
+  assert.equal(win.listeners[1].capture, true);
+  win.dispatch('pagehide');
+  assert.deepEqual(calls, [
+    ['track', 'run_abandoned', { sector: 3 }],
+    ['track', 'session_ended', {}],
+    ['flush'],
+    ['sdk pagehide: game_exited'],
+  ]);
+  assert.equal(Module.FS.files.has(EXIT_MAILBOX_PATH), false, 'the mailbox is emptied');
+  calls.length = 0;
+  win.dispatch('pagehide');
+  assert.deepEqual(calls, [['flush'], ['sdk pagehide: game_exited']], 'a second pagehide sends nothing twice');
+});
+
+test('exit mailbox: the flush prefers flushOnHidden, then _flushOnHidden, then flush', () => {
+  const run = (extra) => {
+    const { rs, calls } = fakeRs();
+    Object.assign(rs, extra(calls));
+    const win = fakeWindow();
+    installRavensightBridge(rs, fakeModule().Module, { window: win, storage: memoryStorage() });
+    win.dispatch('pagehide');
+    return calls;
+  };
+  assert.deepEqual(run((c) => ({
+    flushOnHidden: () => { c.push(['flushOnHidden']); },
+    _flushOnHidden: () => { c.push(['_flushOnHidden']); },
+  })), [['flushOnHidden']]);
+  assert.deepEqual(run((c) => ({ _flushOnHidden: () => { c.push(['_flushOnHidden']); } })), [['_flushOnHidden']]);
+  assert.deepEqual(run(() => ({})), [['flush']]);
+});
+
+test('exit mailbox: no FS, a missing file, bad JSON or a throwing SDK never throw', (t) => {
+  const warn = t.mock.method(console, 'warn', () => {});
+  for (const FS of [undefined, fakeFS(), fakeFS('{not json'), fakeFS('{"event":"x"}'), { readFile: () => { throw new Error('io'); } }]) {
+    const { rs, calls } = fakeRs();
+    const win = fakeWindow();
+    const { Module } = fakeModule();
+    if (FS) Module.FS = FS;
+    installRavensightBridge(rs, Module, { window: win, storage: memoryStorage() });
+    assert.doesNotThrow(() => win.dispatch('pagehide'));
+    assert.deepEqual(calls, [['flush']]);
+  }
+  const rs = {
+    track: () => { throw new Error('bad'); },
+    setEnabled: () => {},
+    flush: () => { throw new Error('offline'); },
+  };
+  const win = fakeWindow();
+  const { Module } = fakeModule();
+  Module.FS = fakeFS(JSON.stringify([{ event: 'a' }]));
+  installRavensightBridge(rs, Module, { window: win, storage: memoryStorage() });
+  assert.doesNotThrow(() => win.dispatch('pagehide'));
+  assert.ok(warn.mock.callCount() >= 1);
+});
+
+test('opt_out default: an opted-out player sends nothing from the mailbox', () => {
+  const { rs, calls } = fakeRs();
+  const win = fakeWindow();
+  const { Module } = fakeModule();
+  Module.FS = fakeFS(JSON.stringify([{ event: 'a' }]));
+  installRavensightBridge(rs, Module, { window: win, storage: memoryStorage() });
+  Module.print(line({ v: 1, op: 'enabled', value: false }));
+  calls.length = 0;
+  win.dispatch('pagehide');
+  assert.deepEqual(calls, []);
+});
+
+test('outside a browser no listener is registered and nothing throws', () => {
+  const { rs } = fakeRs();
+  assert.doesNotThrow(() => installRavensightBridge(rs, fakeModule().Module, { storage: memoryStorage() }));
 });

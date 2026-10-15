@@ -26,6 +26,7 @@ if modulePrefix == '.' then modulePrefix = '' end
 
 local Core = require(modulePrefix .. 'core')
 local json = require(modulePrefix .. 'json')
+local Typed = require(modulePrefix .. 'typed')
 
 local ravensight = { VERSION = Core.VERSION }
 
@@ -41,6 +42,7 @@ local syncTransport
 local transportName
 local warnedNoTransport = false
 local holdingQuit = false
+local health        -- the performance sampler, only with performance = true
 
 local function log(level, message)
   if level == 'info' and not (config and config.debug) then return end
@@ -227,6 +229,9 @@ end
 ---   synchronous   send on the game's own thread, blocking, default false
 ---   timeout       seconds per request, default 15
 ---   debug         print informational messages too, default false
+---   performance   sample the frame rate once a second and send one `health`
+---                 event per session, on quit (desktop) or before the page
+---                 hides (web), default false. See "Typed events" in the README.
 ---
 --- Returns nothing on the desktop. In a web build it returns
 --- { sessionReady = false, reason = 'web_bridge' }, since the page's
@@ -255,6 +260,7 @@ function ravensight.init(options)
     optional = options.optional == true,
     consent = Core.normalizeConsent(options.consent),
     distribution = options.distribution,
+    performance = options.performance == true,
   }
   -- Switched off by the game: no session, no queue, every call a no-op.
   if not config.enabled then
@@ -268,6 +274,7 @@ function ravensight.init(options)
     })
     transportName = 'web'
     core:start()
+    if config.performance then health = Typed.Health.new({ random = love.math and love.math.random or math.random }) end
     return { sessionReady = false, reason = 'web_bridge' }
   end
   -- No key: a keyless clone or a development build. Inert, not an error:
@@ -301,18 +308,48 @@ function ravensight.init(options)
   })
   startNetwork()
   core:start()
+  if config.performance then
+    health = Typed.Health.new({
+      random = love.math and love.math.random or math.random,
+      memoryMb = function() return collectgarbage('count') / 1024 end,
+      -- CPU seconds since the process began, a stand-in for the wall time
+      -- LÖVE does not expose; it covers loading and require()s.
+      bootMs = os.clock() * 1000,
+    })
+  end
 end
 
 --- Delivers answers and runs the batching and retry timers. Call from
---- love.update(dt).
-function ravensight.update()
-  if not core or transportName == 'web' then return end
+--- love.update(dt). Pass dt so performance sampling can use it; the
+--- no-argument form still works (it falls back to love.timer.getDelta).
+function ravensight.update(dt)
+  if not core then return end
+  if health then
+    if dt == nil and love.timer and love.timer.getDelta then dt = love.timer.getDelta() end
+    if health:tick(dt) and transportName == 'web' and (health.seen == 3 or health.seen % 10 == 0) then
+      -- Lua cannot run when the page hides, so the page keeps the latest
+      -- summary and the bridge sends it once, before the page goes.
+      local summary = health:summary()
+      if summary then core:stashHealth(summary) end
+    end
+  end
+  if transportName == 'web' then return end
   pollResponses()
   core:update()
   if holdingQuit and core.quitReady then
     holdingQuit = false
     love.event.quit()
   end
+end
+
+--- Sends the one health event of the session, if sampling is on and any
+--- second was sampled. Desktop only: the web path goes through the bridge.
+local function sendHealth()
+  if not health or health.sent or transportName == 'web' then return end
+  local summary = health:summary()
+  if not summary then return end
+  health.sent = true
+  core:track('health', summary)
 end
 
 --- Call as `function love.quit() return ravensight.quit() end`. The first
@@ -326,6 +363,7 @@ function ravensight.quit()
     if requestChannel then requestChannel:push('stop') end
     return false
   end
+  sendHealth()
   if not config.handleQuit then
     core:beginQuit()
     core:finishQuit()
@@ -340,6 +378,40 @@ end
 --- Queue an event. data is a flat table of strings, numbers and booleans.
 function ravensight.track(name, data)
   if core then core:track(name, data) end
+end
+
+-- Typed events: each builds the reserved rs_* properties (ravensight/typed.lua)
+-- and calls track, so it returns what track returns and never throws on bad
+-- values. opts.props is a map of extra properties, merged first so the
+-- reserved keys win; opts.name replaces the default event name.
+
+--- A real-money purchase. amount is an integer in minor units (499 is 4.99)
+--- or a digit string; currency is a 3 letter code, upper-cased for you.
+--- opts: cart, transactionId, name, props.
+function ravensight.purchase(amount, currency, itemType, itemId, opts)
+  local name, props = Typed.purchase(amount, currency, itemType, itemId, opts)
+  return ravensight.track(name, props)
+end
+
+--- A resource entering ("source") or leaving ("sink") the economy.
+--- opts: itemType, itemId, name, props.
+function ravensight.resource(flow, resource, amount, opts)
+  local name, props = Typed.resource(flow, resource, amount, opts)
+  return ravensight.track(name, props)
+end
+
+--- A progression step: status "start", "complete" or "fail", p1 the level
+--- or node. opts: p2, p3, score, name, props.
+function ravensight.progression(status, p1, opts)
+  local name, props = Typed.progression(status, p1, opts)
+  return ravensight.track(name, props)
+end
+
+--- An error. severity is "debug", "info", "warning", "error" or "critical";
+--- message is cut to 200 characters. opts: stack (cut to 2000), name, props.
+function ravensight.error(severity, message, opts)
+  local name, props = Typed.error(severity, message, opts)
+  return ravensight.track(name, props)
 end
 
 --- Send what is queued now instead of waiting for the batching timer.

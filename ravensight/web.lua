@@ -10,6 +10,11 @@
 --   __RAVENSIGHT__ {"v":1,"op":"feedback","message":"...","category":"...","rating":5}
 --   __RAVENSIGHT__ {"v":1,"op":"enabled","value":false}
 --   __RAVENSIGHT__ {"v":1,"op":"flush"}
+--   __RAVENSIGHT__ {"v":1,"op":"health","data":{...}}
+--
+-- The health line (only with performance = true) is not sent when it
+-- arrives: the bridge keeps the latest one and sends it as a `health` event
+-- once, when the page hides.
 --
 -- The JavaScript SDK owns the session, the device id, batching and the two
 -- lifecycle events (game_started and game_exited), so none of them happen
@@ -137,6 +142,14 @@ function Web:track(name, data)
   end
   self:send({ op = 'track', event = name, data = data, timestamp = timestamp })
   self:emit('event_tracked', name, data)
+end
+
+--- Hands the page the latest performance summary to send on page hide.
+function Web:stashHealth(summary)
+  if not self.trackingEnabled then return end
+  local data = shallowCopy(summary)
+  data.rs_event_id = self:nextEventId()
+  self:send({ op = 'health', data = data })
 end
 
 function Web:flush()

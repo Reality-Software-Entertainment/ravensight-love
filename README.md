@@ -107,8 +107,9 @@ needs in a web build:
 | 0.1.0 | None. A love.js build cannot send requests from Lua. | Not applicable | Games wrote their own print bridge to the JavaScript SDK. |
 | 0.2.0 | `web/ravensight-love-bridge.js` | 0.4.0 | The bridge calls `rs.track`, `rs.submitFeedback`, `rs.setEnabled`, `rs.flush` and `rs.init`, all present in 0.4.0. 0.4.0 is the floor because the Lua SDK sends no `game_started` or `game_exited` on the web, and the JavaScript SDK sends them itself only from 0.4.0 (`autoEvents`). 0.4.0 also makes `init()` on an opted-out client open no session, which the remembered opt-out relies on. |
 | 0.3.0 | `web/ravensight-love-bridge.js` | 0.4.0 | No new call on the page's SDK is required. After the exit mailbox, the bridge calls `rs.flushOnHidden()` if it exists, else `rs._flushOnHidden()`, else `rs.flush()`. ravensight-js 0.4.x has the internal `_flushOnHidden` and no public `flushOnHidden` yet, so on 0.4.x the bridge calls `_flushOnHidden`. An opt-in page constructs its SDK with `enabled: false` and the bridge calls `rs.init()` on the player's yes, which 0.4.0 already supports. |
+| 0.4.0 | `web/ravensight-love-bridge.js` | 0.4.0 | The bridge also keeps the latest `health` line and tracks it once on `pagehide`, using `rs.track` only. Nothing new is required of the page's SDK. |
 
-Nothing in ravensight-love 0.2.0 or 0.3.0 needs the 0.4.1 additions (`rs.session()`
+Nothing in ravensight-love 0.2.0, 0.3.0 or 0.4.0 needs the 0.4.1 additions (`rs.session()`
 and `rs.sessionTokenFor()`), so 0.4.0 or newer is enough. The bridge does not
 call `setPlaytestContext`.
 
@@ -326,12 +327,17 @@ end
 | `synchronous` | `false` | Send on the game's own thread instead of a background one. Each request then blocks the frame it is sent from. For games or platforms without `love.thread`. |
 | `timeout` | `15` | Seconds per request. |
 | `debug` | `false` | Print informational messages too. Warnings always print. |
+| `performance` | `false` | Sample the frame rate once a second and send one `health` event per session. See "Typed events". |
 
 ### Functions
 
 | Function | What it does |
 | --- | --- |
 | `track(name, data)` | Queue an event. `data` is a flat table of strings, numbers and booleans. Safe before the session is ready. |
+| `purchase(amount, currency, itemType, itemId, opts)` | A real-money purchase. See "Typed events". |
+| `resource(flow, resource, amount, opts)` | A resource entering (`"source"`) or leaving (`"sink"`) the economy. |
+| `progression(status, p1, opts)` | A progression step: `"start"`, `"complete"` or `"fail"`. |
+| `error(severity, message, opts)` | An error or warning, with an optional stack. |
 | `flush()` | Send what is queued now instead of waiting for the timer. |
 | `submitFeedback(message, category, rating)` | Send player feedback. `category` is optional and one of `bug`, `suggestion`, `complaint`, `praise`, `playtest` or `other`; `rating` is optional and a whole number from 1 to 5. Needs an open session. Returns `true` when sent, or `false` and a reason (`"invalid_category"`, `"invalid_rating"`, `"no_session"`, `"empty_message"`, `"tracking_disabled"`, or `"not_started"` before `init`, with `enabled = false` or while inert) when refused before sending. |
 | `setTrackingEnabled(enabled)` | The player's choice, remembered across launches. `false` drops the queue and sends nothing, not even the startup check. With `consent = "opt_in"`, `true` is the yes that starts everything. |
@@ -342,7 +348,7 @@ end
 | `setPlaytestContext(ctx)` | Puts a running game into playtest mode. `ctx` needs `token` and `run_id` (plus optional `persona`, `job_id` and `tier`), the same values the playtest CLI passes as `RAVENSIGHT_PLAYTEST_*` variables; it uses a throwaway device id, ignores the player's opt-out, and tags every event as synthetic. `init` already does this when those variables are set, so a game never needs to call it by hand. |
 | `getTransport()` | How requests are sent here, or `nil` if nothing works. |
 | `on(event, fn)` | Listen for an SDK event. Returns a function that stops listening. |
-| `update(dt)` | Call every frame. Delivers answers and runs the batching timer and retries. |
+| `update(dt)` | Call every frame. Delivers answers and runs the batching timer and retries. Pass `dt` so `performance` sampling can use it; with no argument it reads `love.timer.getDelta()`. |
 | `quit()` | Return it from `love.quit`. |
 
 ### Events
@@ -363,6 +369,70 @@ ravensight.on("tracking_disabled", function(source)
   print("analytics off:", source)
 end)
 ```
+
+### Typed events
+
+A typed event is an ordinary event that carries reserved `rs_*` properties,
+so Ravensight can read a purchase, a resource flow, a progression step, an
+error or a health sample without a schema. The four helpers below only build
+those properties and call `track`, so queueing, batching, retries, opt-out
+and playtest runs work exactly as for any other event, and each helper
+returns what `track` returns. They never raise on bad input: a wrong value is
+sent as given and the server flags it, which shows on the Implementation
+health card.
+
+Each helper takes an optional last `opts` table. `opts.name` replaces the
+default event name, and `opts.props` is a table of extra properties that is
+merged first, so the reserved keys always win.
+
+```lua
+-- 4.99 USD. amount is whole minor units (an integer or a digit string);
+-- the currency is upper-cased for you. Event name: "purchase".
+ravensight.purchase(499, "usd", "bundle", "starter_pack", {
+  cart = "cart_81", transactionId = "txn_1029",
+})
+
+-- Gold earned and spent. Event name: "resource_source" or "resource_sink".
+ravensight.resource("source", "gold", 120)
+ravensight.resource("sink", "gold", 40, { itemType = "weapon", itemId = "iron_axe" })
+
+-- Event name: "progression_start", "progression_complete" or "progression_fail".
+ravensight.progression("start", "world1", { p2 = "level3" })
+ravensight.progression("complete", "world1", { p2 = "level3", p3 = "boss", score = 1250 })
+
+-- severity: debug, info, warning, error or critical. The message is cut to
+-- 200 characters and the stack to 2000. Event name: "error".
+ravensight.error("critical", "save file would not load", { stack = debug.traceback() })
+```
+
+| Helper | Reserved keys it sets |
+| --- | --- |
+| `purchase` | `rs_kind="purchase"`, `rs_amount`, `rs_currency`, `rs_item_type`, `rs_item_id`, and when given `rs_cart` and `rs_transaction_id` (`opts.cart`, `opts.transactionId`) |
+| `resource` | `rs_kind="resource"`, `rs_flow`, `rs_resource`, `rs_amount`, and when given `rs_item_type` and `rs_item_id` (`opts.itemType`, `opts.itemId`) |
+| `progression` | `rs_kind="progression"`, `rs_status`, `rs_p1`, and when given `rs_p2`, `rs_p3` and `rs_score` (`opts.p2`, `opts.p3`, `opts.score`) |
+| `error` | `rs_kind="error"`, `rs_severity`, `rs_message`, and when given `rs_stack` (`opts.stack`) |
+
+#### Frame rate and memory, opt in
+
+Pass `performance = true` to `init` and call `ravensight.update(dt)` from
+`love.update(dt)`. The SDK samples the frame time once a second, keeps at
+most 600 samples, and sends one `health` event per session with the median
+and the 10th percentile of frames per second (`rs_fps_median`, `rs_fps_p10`).
+On the desktop it also adds the Lua heap in megabytes (`rs_memory_mb`) and
+`rs_boot_ms`, the processor time the process had used when the SDK started.
+It is sent when the game quits (through `ravensight.quit()`), never once a
+second and never from `update`. If no full second was ever sampled, nothing
+is sent.
+
+In a love.js web build Lua cannot run when the page is hidden, so it hands
+the page its latest summary every ten sampled seconds (printed as a `health`
+line that the bridge keeps, not sends), and `ravensight-love-bridge.js` sends
+the latest one as the `health` event once, just before the page hides. Use
+the bridge from this release for that; an older bridge prints the line and
+sends no health event. The web summary has no memory or boot figure.
+
+An Android or iOS build has no quit to hook, so it sends no health event
+yet.
 
 ## What it sends, and what it does not
 

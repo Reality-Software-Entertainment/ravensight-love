@@ -431,3 +431,63 @@ test('exit mailbox: without unlink it writes [] back, so a second pagehide canno
   assert.equal(FS.files.get(EXIT_MAILBOX_PATH), '[]');
   assert.equal(calls.filter((c) => c[0] === 'track').length, 1);
 });
+
+// ------------------------------------------------------------- 0.4.0
+
+test('health: the latest summary is kept and tracked once on pagehide, before the flush', () => {
+  const { rs, calls } = fakeRs();
+  const win = fakeWindow();
+  const { Module, printed } = fakeModule();
+  installRavensightBridge(rs, Module, { window: win, storage: memoryStorage() });
+  const first = { rs_kind: 'health', rs_fps_median: 58, rs_fps_p10: 40, rs_event_id: 'a' };
+  const latest = { rs_kind: 'health', rs_fps_median: 60, rs_fps_p10: 45, rs_event_id: 'b' };
+  Module.print(line({ v: 1, op: 'health', data: first }));
+  Module.print(line({ v: 1, op: 'health', data: latest }));
+  assert.deepEqual(calls, [], 'nothing is sent while the page is open');
+  assert.deepEqual(printed, [], 'the line is not printed');
+  win.dispatch('pagehide');
+  assert.deepEqual(calls, [['track', 'health', latest], ['flush']]);
+  win.dispatch('pagehide');
+  assert.equal(calls.filter((c) => c[0] === 'track').length, 1, 'a restored page cannot resend');
+});
+
+test('health: nothing is sent without a summary, for a malformed one, or while opted out', () => {
+  {
+    const { rs, calls } = fakeRs();
+    const win = fakeWindow();
+    const { Module } = fakeModule();
+    installRavensightBridge(rs, Module, { window: win, storage: memoryStorage() });
+    Module.print(line({ v: 1, op: 'health', data: 'nope' }));
+    Module.print(line({ v: 1, op: 'health', data: [1, 2] }));
+    win.dispatch('pagehide');
+    assert.deepEqual(calls, [['flush']]);
+  }
+  {
+    const { rs, calls } = fakeRs();
+    const win = fakeWindow();
+    const { Module } = fakeModule();
+    installRavensightBridge(rs, Module, { window: win, storage: memoryStorage() });
+    Module.print(line({ v: 1, op: 'health', data: { rs_kind: 'health', rs_fps_median: 60, rs_fps_p10: 50 } }));
+    Module.print(line({ v: 1, op: 'enabled', value: false }));
+    calls.length = 0;
+    win.dispatch('pagehide');
+    assert.deepEqual(calls, []);
+  }
+});
+
+test('health: the sink swallows the line and a throwing track never breaks pagehide', (t) => {
+  const { Module, printed } = fakeModule();
+  installRavensightBridge(null, Module);
+  Module.print(line({ v: 1, op: 'health', data: { rs_kind: 'health' } }));
+  assert.deepEqual(printed, []);
+  const warn = t.mock.method(console, 'warn', () => {});
+  const { rs, calls } = fakeRs();
+  rs.track = () => { throw new Error('boom'); };
+  const win = fakeWindow();
+  const second = fakeModule();
+  installRavensightBridge(rs, second.Module, { window: win, storage: memoryStorage() });
+  second.Module.print(line({ v: 1, op: 'health', data: { rs_kind: 'health', rs_fps_median: 30, rs_fps_p10: 20 } }));
+  assert.doesNotThrow(() => win.dispatch('pagehide'));
+  assert.deepEqual(calls, [['flush']]);
+  assert.equal(warn.mock.callCount(), 1);
+});

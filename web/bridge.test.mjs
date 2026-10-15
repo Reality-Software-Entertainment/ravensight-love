@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   installRavensightBridge, ravensightLoveEnabled, ENABLED_KEY, TAG, MAX_LINE_LENGTH, EXIT_MAILBOX_PATH,
+  MAX_MAILBOX_LENGTH, MAX_MAILBOX_ENTRIES,
 } from './ravensight-love-bridge.js';
 
 function fakeRs({ withFeedback = true } = {}) {
@@ -290,10 +291,10 @@ test('exit mailbox: the flush prefers flushOnHidden, then _flushOnHidden, then f
     return calls;
   };
   assert.deepEqual(run((c) => ({
-    flushOnHidden: () => { c.push(['flushOnHidden']); },
-    _flushOnHidden: () => { c.push(['_flushOnHidden']); },
-  })), [['flushOnHidden']]);
-  assert.deepEqual(run((c) => ({ _flushOnHidden: () => { c.push(['_flushOnHidden']); } })), [['_flushOnHidden']]);
+    flushOnHidden: (...a) => { c.push(['flushOnHidden', ...a]); },
+    _flushOnHidden: (...a) => { c.push(['_flushOnHidden', ...a]); },
+  })), [['flushOnHidden', 0]]);
+  assert.deepEqual(run((c) => ({ _flushOnHidden: (...a) => { c.push(['_flushOnHidden', ...a]); } })), [['_flushOnHidden', 0]]);
   assert.deepEqual(run(() => ({})), [['flush']]);
 });
 
@@ -369,4 +370,64 @@ test('page side, opt_in: the game start line false wins over a page that remembe
   assert.deepEqual(calls, [['setEnabled', false]]);
   assert.equal(storage.data.get(ENABLED_KEY), 'false');
   assert.equal(ravensightLoveEnabled(storage, { consent: 'opt_in' }), false);
+});
+
+test('exit mailbox: the flush skips the batch in flight (rs._inflightSize)', () => {
+  for (const name of ['_flushOnHidden', 'flushOnHidden']) {
+    const { rs, calls } = fakeRs();
+    rs._inflightSize = 7;
+    rs[name] = (...a) => { calls.push([name, ...a]); };
+    const win = fakeWindow();
+    installRavensightBridge(rs, fakeModule().Module, { window: win, storage: memoryStorage() });
+    win.dispatch('pagehide');
+    assert.deepEqual(calls, [[name, 7]]);
+  }
+  const { rs, calls } = fakeRs();
+  rs._inflightSize = 'x';
+  rs._flushOnHidden = (...a) => { calls.push(['_flushOnHidden', ...a]); };
+  const win = fakeWindow();
+  installRavensightBridge(rs, fakeModule().Module, { window: win, storage: memoryStorage() });
+  win.dispatch('pagehide');
+  assert.deepEqual(calls, [['_flushOnHidden', 0]], 'anything but a positive integer is 0');
+});
+
+test('exit mailbox: over 64 KB is discarded unparsed, and at most 200 entries are sent', () => {
+  const big = JSON.stringify([{ event: 'big', data: { blob: 'x'.repeat(MAX_MAILBOX_LENGTH) } }]);
+  assert.ok(big.length > MAX_MAILBOX_LENGTH);
+  {
+    const { rs, calls } = fakeRs();
+    const win = fakeWindow();
+    const { Module } = fakeModule();
+    Module.FS = fakeFS(big);
+    installRavensightBridge(rs, Module, { window: win, storage: memoryStorage() });
+    win.dispatch('pagehide');
+    assert.deepEqual(calls, [['flush']]);
+    assert.equal(Module.FS.files.has(EXIT_MAILBOX_PATH), false, 'discarded');
+  }
+  {
+    const { rs, calls } = fakeRs();
+    const win = fakeWindow();
+    const { Module } = fakeModule();
+    Module.FS = fakeFS(JSON.stringify(Array.from({ length: 250 }, (_, i) => ({ event: 'e' + i }))));
+    installRavensightBridge(rs, Module, { window: win, storage: memoryStorage() });
+    win.dispatch('pagehide');
+    const tracked = calls.filter((c) => c[0] === 'track');
+    assert.equal(tracked.length, MAX_MAILBOX_ENTRIES);
+    assert.equal(tracked.at(-1)[1], 'e199');
+  }
+});
+
+test('exit mailbox: without unlink it writes [] back, so a second pagehide cannot resend', () => {
+  const { rs, calls } = fakeRs();
+  const win = fakeWindow();
+  const { Module } = fakeModule();
+  const FS = fakeFS(JSON.stringify([{ event: 'once' }]));
+  delete FS.unlink;
+  FS.writeFile = (path, text) => FS.files.set(path, text);
+  Module.FS = FS;
+  installRavensightBridge(rs, Module, { window: win, storage: memoryStorage() });
+  win.dispatch('pagehide');
+  win.dispatch('pagehide');
+  assert.equal(FS.files.get(EXIT_MAILBOX_PATH), '[]');
+  assert.equal(calls.filter((c) => c[0] === 'track').length, 1);
 });

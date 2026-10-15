@@ -41,6 +41,12 @@ export const MAX_LINE_LENGTH = 32 * 1024;
 /** Where a game's adapter leaves events for the bridge to send on pagehide. */
 export const EXIT_MAILBOX_PATH = '/tmp/ravensight-exit.json';
 
+/** A mailbox longer than this is discarded unparsed. */
+export const MAX_MAILBOX_LENGTH = 64 * 1024;
+
+/** At most this many mailbox entries are sent; the rest are discarded. */
+export const MAX_MAILBOX_ENTRIES = 200;
+
 const OPT_IN = 'opt_in';
 
 /** The page's localStorage, or null where it is missing or blocked. */
@@ -202,27 +208,44 @@ export function installRavensightBridge(rs, Module, options = {}) {
         if (!enabled) return undefined;
         const FS = Module.FS;
         if (FS && typeof FS.readFile === 'function') {
-          let entries = null;
+          let text = null;
           try {
-            entries = JSON.parse(FS.readFile(EXIT_MAILBOX_PATH, { encoding: 'utf8' }));
+            text = FS.readFile(EXIT_MAILBOX_PATH, { encoding: 'utf8' });
           } catch {
-            entries = null; // no mailbox, or not JSON: nothing to send
+            text = null; // no mailbox: nothing to send
           }
-          if (Array.isArray(entries)) {
+          let entries = null;
+          if (typeof text === 'string') {
+            // Empty it first, so a second pagehide (a page restored from the
+            // back/forward cache, for example) can never resend.
             try {
               if (typeof FS.unlink === 'function') FS.unlink(EXIT_MAILBOX_PATH);
+              else if (typeof FS.writeFile === 'function') FS.writeFile(EXIT_MAILBOX_PATH, '[]');
             } catch {
-              // Already gone; a second pagehide finds nothing either way.
+              // Already gone, or read-only: nothing more can be done.
             }
-            for (const entry of entries) {
+            if (text.length <= MAX_MAILBOX_LENGTH) {
+              try {
+                entries = JSON.parse(text);
+              } catch {
+                entries = null; // not JSON: nothing to send
+              }
+            }
+          }
+          if (Array.isArray(entries)) {
+            for (const entry of entries.slice(0, MAX_MAILBOX_ENTRIES)) {
               if (entry && typeof entry.event === 'string' && entry.event !== '') {
                 guard('exit', () => rs.track(entry.event, entry.data && typeof entry.data === 'object' ? entry.data : {}));
               }
             }
           }
         }
-        if (typeof rs.flushOnHidden === 'function') return rs.flushOnHidden();
-        if (typeof rs._flushOnHidden === 'function') return rs._flushOnHidden();
+        // The offset skips the batch already in flight, so those events are
+        // not beaconed twice and the SDK's own bookkeeping stays right if
+        // the page survives.
+        const inflight = Number.isInteger(rs._inflightSize) && rs._inflightSize > 0 ? rs._inflightSize : 0;
+        if (typeof rs.flushOnHidden === 'function') return rs.flushOnHidden(inflight);
+        if (typeof rs._flushOnHidden === 'function') return rs._flushOnHidden(inflight);
         return typeof rs.flush === 'function' ? rs.flush() : undefined;
       });
     }, { capture: true });

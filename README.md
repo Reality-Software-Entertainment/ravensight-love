@@ -82,6 +82,25 @@ page's SDK as well as `enabled = false` to `init`. With `enabled = false`,
 `init` returns `nil` in a web build too: the SDK starts nothing and prints
 nothing.
 
+## Compatibility
+
+Which `ravensight` (npm JavaScript SDK) version each ravensight-love version
+needs in a web build:
+
+| ravensight-love | Browser transport | Minimum `ravensight` JS SDK | Why |
+|---|---|---|---|
+| 0.1.0 | None. A love.js build cannot send requests from Lua. | Not applicable | Games wrote their own print bridge to the JavaScript SDK. |
+| 0.2.0 | `web/ravensight-love-bridge.js` | 0.4.0 | The bridge calls `rs.track`, `rs.submitFeedback`, `rs.setEnabled`, `rs.flush` and `rs.init`, which every release has. 0.4.0 is needed because the Lua SDK sends no `game_started` or `game_exited` on the web, and the JavaScript SDK sends them itself only from 0.4.0 (`autoEvents`). 0.4.0 also makes `init()` on an opted-out client open no session, which the remembered opt-out relies on. |
+
+Nothing in ravensight-love 0.2.0 needs the 0.4.1 additions (`rs.session()`
+and `rs.sessionTokenFor()`), so 0.4.0 or newer is enough. The bridge does not
+call `setPlaytestContext`.
+
+If you shipped on 0.1.0 with your own print bridge, it keeps working. To move
+to the official bridge, follow the steps in "Shipping to the web" above, and
+delete your own `game_started` tracking (or pass `autoEvents: false`) so
+sessions are not counted twice.
+
 ## Install
 
 Copy the `ravensight` folder into your game, next to `main.lua`:

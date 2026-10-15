@@ -729,4 +729,37 @@ return {
     eq(h.core:isTrackingEnabled(), false)
     eq(#h.requests, 0)
   end },
+  { 'opt_out start: a track during the settings check waits for its answer', function()
+    -- 200 with tracking on: the answer opens the session, and both events go.
+    local on = harness()
+    on.core:start()
+    on.core:track('menu_opened', {})
+    eq(#on.requests, 1, 'only the settings check is out')
+    on.answer('/api/v1/settings', 200, { trackingEnabled = true })
+    on.openSession()
+    local names = {}
+    for _, e in ipairs(on.batchBody(on.answer('/api/v1/track/batch', 202))) do names[#names + 1] = e.event end
+    eq(table.concat(names, ','), 'menu_opened,game_started')
+
+    -- A timeout (status 0) or a 5xx fails open: the session still opens.
+    for _, status in ipairs({ 0, 503 }) do
+      local h = harness()
+      h.core:start()
+      h.core:track('menu_opened', {})
+      eq(#h.requests, 1, tostring(status))
+      h.answer('/api/v1/settings', status)
+      eq(h.core:isTrackingEnabled(), true, tostring(status))
+      h.openSession()
+      eq(#h.batchBody(h.answer('/api/v1/track/batch', 202)), 2, tostring(status))
+    end
+
+    -- 200 with tracking off: the queued event is dropped and nothing opens.
+    local off = harness()
+    off.core:start()
+    off.core:track('menu_opened', {})
+    off.answer('/api/v1/settings', 200, { trackingEnabled = false })
+    eq(#off.core.pending, 0)
+    eq(#off.requests, 0)
+    eq(off.fired('tracking_disabled')[2], 'server')
+  end },
 }

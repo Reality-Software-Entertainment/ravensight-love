@@ -301,11 +301,10 @@ end
   once, tracks each entry and asks the page's SDK to flush, passing the
   size of the batch already in flight so those events are not sent twice.
   A mailbox over 64 KB is discarded unread, and at most 200 entries are
-  sent. Its
-  listener uses the capture phase so it runs before the SDK's own `pagehide`
-  handling, which still sends `game_exited` as before. Nothing is sent from
-  the mailbox while the player has tracking off. It is best effort and never
-  throws into the page.
+  sent. Its listener uses the capture phase so it runs before the SDK's own
+  `pagehide` handling, which still sends `game_exited` as before. Nothing is
+  sent from the mailbox while the player has tracking off. It is best effort
+  and never throws into the page.
 
 ## Reference
 
@@ -427,6 +426,10 @@ launch. `getTransport()` tells you which one is in use.
 
 ## Delivery
 
+- The session opens once the startup settings check is answered. Events
+  tracked while it is out are queued, and the answer (or its timeout)
+  opens the session. A timeout or a server error still counts as tracking
+  on; only an explicit "off" stops it.
 - Events are batched: a request goes out 2 seconds (`flushInterval`) after
   the first waiting event, or at once when 50 are waiting, on `flush()`, on
   quit, and when a session opens with events waiting. With `debug = true`

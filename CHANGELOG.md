@@ -8,6 +8,11 @@ changes listed first.
 
 ### Changes for 0.2.0 games
 
+- A `track()` during the startup settings check no longer opens a session
+  in parallel. The event is queued, and the settings answer, or its
+  timeout, opens the session. A timeout or a 5xx still counts as tracking
+  on, as before.
+
 - A 401 or 403 answer to the settings check or to opening a session (other
   than the tracking switch and a refused playtest token) now stops the SDK
   for the rest of the run, with `tracking_disabled("key")`, instead of

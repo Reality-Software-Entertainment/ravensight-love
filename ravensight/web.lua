@@ -15,6 +15,10 @@
 -- lifecycle events (game_started and game_exited), so none of them happen
 -- here. Keys come out sorted, since the SDK's JSON encoder sorts them.
 --
+-- At start the player's saved choice is always passed to the page as one
+-- `enabled` line, so with consent = "opt_in" a page that started switched
+-- off stays off until the player says yes in the game.
+--
 -- MIT licensed, part of ravensight-love.
 
 local prefix = (...):gsub('web$', '')
@@ -40,6 +44,8 @@ local function noop() end
 ---   time()                          unix seconds, default os.time
 ---   storage                         {read(name), write(name, text), remove(name)}
 ---   log(level, message)             "info", "warn" or "error"
+---   consent                         "opt_out" (default) or "opt_in"
+---   randomHex(bytes)                random lowercase hex, for rs_event_id
 function Web.new(deps)
   deps = deps or {}
   local self = setmetatable({}, Web)
@@ -47,8 +53,12 @@ function Web.new(deps)
   self.time = deps.time or os.time
   self.storage = deps.storage or { read = noop, write = noop, remove = noop }
   self.log = deps.log or noop
+  self.consent = Core.normalizeConsent(deps.consent)
+  self.randomHex = deps.randomHex or function(n) return string.rep('0', n * 2) end
   self.listeners = {}
   self.trackingEnabled = true
+  self.eventCounter = 0
+  self.warnedTooLarge = false
   return self
 end
 
@@ -76,13 +86,30 @@ function Web:send(message)
   self.print(Web.TAG .. json.encode(message))
 end
 
---- Reads the player's saved opt-out and, if there is one, tells the page.
+--- Reads the player's saved choice and always tells the page, so the page
+--- SDK is switched on or off to match before the first event.
 function Web:start()
   self.log('info', 'transport web (bridge to ravensight-js)')
-  if self.storage.read(Core.OPTOUT_FILE) ~= nil then
-    self.trackingEnabled = false
-    self:send({ op = 'enabled', value = false })
+  self.startTime = self.time()
+  self.trackingEnabled = Core.savedChoice(self.storage, self.consent)
+  self:send({ op = 'enabled', value = self.trackingEnabled })
+end
+
+local function shallowCopy(t)
+  local out = {}
+  for k, v in pairs(t) do out[k] = v end
+  return out
+end
+
+--- The page owns the device id, so the first part of a web event id is a
+--- random value made once per launch instead.
+function Web:nextEventId()
+  if not self.launchId then
+    self.launchId = self.randomHex(8)
+    self.eventNonce = self.randomHex(2)
   end
+  self.eventCounter = self.eventCounter + 1
+  return Core.eventId(self.launchId, self.startTime or self.time(), self.eventNonce, self.eventCounter)
 end
 
 function Web:track(name, data)
@@ -91,8 +118,18 @@ function Web:track(name, data)
   if data ~= nil and type(data) ~= 'table' then
     error('ravensight.track: data must be a table or nil', 2)
   end
-  data = data or {}
-  self:send({ op = 'track', event = name, data = data, timestamp = self.time() * 1000 })
+  data = shallowCopy(data or {})
+  data.rs_event_id = self:nextEventId()
+  local timestamp = self.time() * 1000
+  if Core.eventBytes(name, data, timestamp) > Core.MAX_EVENT_BYTES then
+    if not self.warnedTooLarge then
+      self.warnedTooLarge = true
+      self.log('warn', 'dropped event "' .. name .. '": larger than ' .. Core.MAX_EVENT_BYTES .. ' bytes as JSON (further drops are not logged)')
+    end
+    self:emit('flush_failed', 'event_too_large')
+    return
+  end
+  self:send({ op = 'track', event = name, data = data, timestamp = timestamp })
   self:emit('event_tracked', name, data)
 end
 
@@ -129,16 +166,12 @@ function Web:submitFeedback(message, category, rating)
   return true
 end
 
---- The player's opt-out, saved like on the desktop and passed to the page.
+--- The player's choice, saved like on the desktop and passed to the page.
 function Web:setTrackingEnabled(enabled)
   enabled = enabled and true or false
   if enabled == self.trackingEnabled then return end
   self.trackingEnabled = enabled
-  if enabled then
-    self.storage.remove(Core.OPTOUT_FILE)
-  else
-    self.storage.write(Core.OPTOUT_FILE, '1')
-  end
+  Core.saveChoice(self.storage, self.consent, enabled)
   self:send({ op = 'enabled', value = enabled })
   if not enabled then
     self.log('info', 'tracking disabled by player opt-out')

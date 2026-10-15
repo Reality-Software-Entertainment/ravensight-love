@@ -31,6 +31,7 @@ local ravensight = { VERSION = Core.VERSION }
 
 local core          -- the desktop state machine, or the web bridge
 local initialized = false
+local inert = false -- started with no key: nothing is written or sent
 local config
 local worker, requestChannel, responseChannel
 local nextRequestId = 0
@@ -205,7 +206,15 @@ end
 
 --- Starts the SDK. Call once, from love.load().
 ---   apiUrl        "https://api.ravensight.io", with or without /api/v1
----   ingestKey     your game's publishable gt_live_ key
+---   ingestKey     your game's publishable key. Missing or empty, the SDK
+---                 is inert on the desktop: no files, no network, every call
+---                 a no-op. Not needed on the web, where the page owns it.
+---   optional      true silences the one warning an inert start prints
+---   consent       "opt_out" (default): on until the player opts out.
+---                 "opt_in": nothing is sent, and no device id is made,
+---                 until setTrackingEnabled(true). Saved as ravensight_optin.
+---   distribution  a short label sent on the session, such as
+---                 "native-release" or "web-itch", default none
 ---   gameVersion   reported with every session, default "1.0.0"
 ---   enabled       false sends and queues nothing for this run, and is not
 ---                 saved, default true
@@ -221,10 +230,11 @@ end
 ---
 --- Returns nothing on the desktop. In a web build it returns
 --- { sessionReady = false, reason = 'web_bridge' }, since the page's
---- JavaScript SDK opens the session.
+--- JavaScript SDK opens the session. Started inert (no key, not on the web)
+--- it returns { sessionReady = false, reason = 'no_key' }.
 function ravensight.init(options)
   assert(type(options) == 'table', 'ravensight.init: pass a table of options')
-  assert(type(options.ingestKey) == 'string' and options.ingestKey ~= '', 'ravensight.init: ingestKey is required')
+  assert(options.ingestKey == nil or type(options.ingestKey) == 'string', 'ravensight.init: ingestKey must be a string')
   if initialized then
     log('warn', 'init() called twice; the second call is ignored')
     return
@@ -232,7 +242,7 @@ function ravensight.init(options)
   initialized = true
   config = {
     apiUrl = options.apiUrl or 'https://api.ravensight.io',
-    ingestKey = options.ingestKey,
+    ingestKey = options.ingestKey or '',
     gameVersion = options.gameVersion or '1.0.0',
     enabled = options.enabled ~= false,
     maxQueueSize = options.maxQueueSize or Core.DEFAULT_MAX_QUEUE_SIZE,
@@ -242,6 +252,9 @@ function ravensight.init(options)
     timeout = options.timeout or 15,
     debug = options.debug == true,
     synchronous = options.synchronous == true,
+    optional = options.optional == true,
+    consent = Core.normalizeConsent(options.consent),
+    distribution = options.distribution,
   }
   -- Switched off by the game: no session, no queue, every call a no-op.
   if not config.enabled then
@@ -249,10 +262,22 @@ function ravensight.init(options)
     return
   end
   if config.transport == 'web' or systemName() == 'Web' then
-    core = require(modulePrefix .. 'web').new({ storage = storage, log = log })
+    -- The page holds the key; the Lua side needs none.
+    core = require(modulePrefix .. 'web').new({
+      storage = storage, log = log, consent = config.consent, randomHex = randomHex,
+    })
     transportName = 'web'
     core:start()
     return { sessionReady = false, reason = 'web_bridge' }
+  end
+  -- No key: a keyless clone or a development build. Inert, not an error:
+  -- no files, no network, no thread, and every call a no-op.
+  if config.ingestKey == '' then
+    inert = true
+    if not config.optional then
+      log('warn', 'no ingestKey, so analytics is off for this run (pass optional = true to silence this line)')
+    end
+    return { sessionReady = false, reason = 'no_key' }
   end
   local platform, osName = platformNames()
   core = Core.new({
@@ -270,6 +295,9 @@ function ravensight.init(options)
     osName = osName,
     log = log,
     playtest = playtestFromEnvironment(),
+    consent = config.consent,
+    distribution = config.distribution,
+    random = love.math and love.math.random or math.random,
   })
   startNetwork()
   core:start()
@@ -329,24 +357,32 @@ function ravensight.submitFeedback(message, category, rating)
   return core:submitFeedback(message, category, rating)
 end
 
---- Player opt-out, remembered across launches. Wire it to your own consent
---- or settings screen; Ravensight ships no consent UI. After
---- init({ enabled = false }) the choice is still saved, but it cannot turn
---- the SDK on: that choice is the game's, for the whole run.
+--- The player's choice, remembered across launches. Wire it to your own
+--- consent or settings screen; Ravensight ships no consent UI. With
+--- consent = "opt_in" it is the yes that starts everything. After
+--- init({ enabled = false }), or an inert start with no key, the choice is
+--- still saved, but it cannot turn the SDK on for this run.
 function ravensight.setTrackingEnabled(enabled)
   if core then
     core:setTrackingEnabled(enabled)
   elseif initialized then
-    if enabled then storage.remove(Core.OPTOUT_FILE) else storage.write(Core.OPTOUT_FILE, '1') end
+    Core.saveChoice(storage, config.consent, enabled and true or false)
   end
 end
 
---- True while events are being collected. After init({ enabled = false })
---- nothing is collected, and this reports the player's saved choice, so a
---- settings toggle still shows the right state.
+--- The player's choice. While collecting, true when events are collected.
+--- After init({ enabled = false }) or an inert start, it reports the
+--- player's saved choice, so a settings toggle still shows the right state.
 function ravensight.isTrackingEnabled()
   if core then return core:isTrackingEnabled() end
-  return initialized and storage.read(Core.OPTOUT_FILE) == nil
+  return initialized and Core.savedChoice(storage, config.consent)
+end
+
+--- True only when the SDK is running and collecting: a key (or the web
+--- bridge), not switched off by enabled = false, the player, the server or a
+--- refused key. Use it to skip work that only feeds analytics.
+function ravensight.enabled()
+  return core ~= nil and core:isTrackingEnabled() == true
 end
 
 --- Starts a fresh analytics identity for this install. In a web build the

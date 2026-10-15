@@ -12,7 +12,8 @@ local clicks, status = 0, "starting"
 function love.load()
   ravensight.init({
     apiUrl = os.getenv("RAVENSIGHT_API_URL") or "https://api.ravensight.io",
-    ingestKey = os.getenv("RAVENSIGHT_INGEST_KEY") or "gt_live_replace_me",
+    -- No key set: the SDK is inert, writes nothing and sends nothing.
+    ingestKey = os.getenv("RAVENSIGHT_INGEST_KEY"),
     gameVersion = "0.1.0",
     debug = true,
   })

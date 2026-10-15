@@ -34,7 +34,7 @@ var applicationLoad = async function () {
   const { installRavensightBridge, ravensightLoveEnabled } = await import('./ravensight-love-bridge.js');
   const enabled = ravensightLoveEnabled();   // false after the player opted out
   const rs = new Ravensight({
-    ingestKey: 'gt_live_...',                // the same key as in your Lua init
+    ingestKey: 'gt_live_...',                // the key lives here; Lua needs none on the web
     gameVersion: '1.0.0',
     enabled,
   });
@@ -56,22 +56,27 @@ other line still prints.
 
 On the web the JavaScript SDK owns the session, the device id and the two
 lifecycle events, `game_started` and `game_exited`, so the Lua SDK sends
-neither of them there. `init()` returns
+neither of them there. The key lives on the page, so the Lua `init` needs
+none there. `init()` returns
 `{ sessionReady = false, reason = "web_bridge" }`, `getTransport()` is
 `"web"`, `getDeviceId()` is `nil`, and `resetDeviceId()` is a call to make
 on the page's SDK instead. Of the SDK events, only `event_tracked`,
-`tracking_disabled` and `feedback_failed` (for a refusal before sending, such
-as `"invalid_category"`) fire in a web build; `session_ready`,
-`session_failed`, `events_flushed`, `flush_failed` and `feedback_submitted`
-belong to the page's SDK and never fire in Lua there.
+`tracking_disabled`, `feedback_failed` (for a refusal before sending, such
+as `"invalid_category"`) and `flush_failed` with `"event_too_large"` (an
+event over 8,192 bytes, never printed) fire in a web build;
+`session_ready`, `session_failed`, `events_flushed`, other `flush_failed`
+reasons and `feedback_submitted` belong to the page's SDK and never fire in
+Lua there.
 
-A player's opt-out on the web: `setTrackingEnabled(false)` prints a line that
-switches the page's SDK off at once, and the bridge remembers the choice in
-the page's `localStorage` (`ravensight.love.enabled`). On the next visit,
+A player's choice on the web: at every start the Lua SDK prints one
+`enabled` line with the choice saved in the game's own save folder, and
+`setTrackingEnabled` prints another whenever it changes, which switches the
+page's SDK on or off at once. The bridge remembers the choice in the page's
+`localStorage` (`ravensight.love.enabled`). On the next visit,
 `ravensightLoveEnabled()` reads it before the page's SDK is constructed, so an
 opted-out player opens no session and sends no `game_started`. Where
 `localStorage` is blocked, the choice still holds for that visit, and the
-game's own saved opt-out switches the page off again once the game has loaded.
+game's own saved choice switches the page to match once the game has loaded.
 A player who opts back in through the game is counted again from that moment,
 and the bridge starts the page's SDK if it never started, but there is no
 `game_started` for that visit: the page's SDK sends it only when it is
@@ -82,6 +87,12 @@ page's SDK as well as `enabled = false` to `init`. With `enabled = false`,
 `init` returns `nil` in a web build too: the SDK starts nothing and prints
 nothing.
 
+A page with no key (a fork, or a development build) passes `null` as the
+client: `installRavensightBridge(null, Module)`. The bridge then swallows
+the tagged lines and lets every other line print, and the game behaves
+exactly as it does with a key. See "Public builds" below for opt-in pages,
+the 32 KB line limit and the exit mailbox.
+
 ## Compatibility
 
 Which `ravensight` (npm JavaScript SDK) version each ravensight-love version
@@ -91,8 +102,9 @@ needs in a web build:
 |---|---|---|---|
 | 0.1.0 | None. A love.js build cannot send requests from Lua. | Not applicable | Games wrote their own print bridge to the JavaScript SDK. |
 | 0.2.0 | `web/ravensight-love-bridge.js` | 0.4.0 | The bridge calls `rs.track`, `rs.submitFeedback`, `rs.setEnabled`, `rs.flush` and `rs.init`, all present in 0.4.0. 0.4.0 is the floor because the Lua SDK sends no `game_started` or `game_exited` on the web, and the JavaScript SDK sends them itself only from 0.4.0 (`autoEvents`). 0.4.0 also makes `init()` on an opted-out client open no session, which the remembered opt-out relies on. |
+| 0.3.0 | `web/ravensight-love-bridge.js` | 0.4.0 | No new call on the page's SDK is required. The exit mailbox uses `rs.flushOnHidden()` or `rs._flushOnHidden()` when the SDK has one, and `rs.flush()` otherwise, so 0.4.0 still works. An opt-in page constructs its SDK with `enabled: false` and the bridge calls `rs.init()` on the player's yes, which 0.4.0 already supports. |
 
-Nothing in ravensight-love 0.2.0 needs the 0.4.1 additions (`rs.session()`
+Nothing in ravensight-love 0.2.0 or 0.3.0 needs the 0.4.1 additions (`rs.session()`
 and `rs.sessionTokenFor()`), so 0.4.0 or newer is enough. The bridge does not
 call `setPlaytestContext`.
 
@@ -158,7 +170,9 @@ ravensight.track("level_complete", { level = "forest_1", seconds = 74, deaths = 
 `game_started` is sent for you on launch and `game_exited` on quit.
 
 The ingest key is publishable: it can open sessions and read the tracking
-switch, nothing else. It is safe to ship inside your game.
+switch, nothing else. It is safe to ship inside your game. Anything shipped
+is public, though, so for a game whose builds or source anyone can download,
+read "Public builds" below.
 
 ### If your game already has a `love.quit`
 
@@ -176,13 +190,117 @@ end
 If you would rather the SDK never delays a quit, pass `handleQuit = false`.
 It still records `game_exited` and tries to send it.
 
+## Public builds
+
+For a game anyone can download, fork or play in a browser: a demo, a game
+jam entry, an open source project. Nothing here changes a game that does
+not use these options.
+
+- **No key, no analytics.** `init` with no `ingestKey`, or an empty one, is
+  inert on the desktop: it writes no files, makes no request, starts no
+  thread, and every call is a quiet no-op. It prints one warning line;
+  `optional = true` silences it. `init` returns
+  `{ sessionReady = false, reason = "no_key" }`. So a public repository can
+  ship with no key in it, and a clone or a development build sends nothing.
+  Inject the key into release builds only. In a web build the Lua side
+  needs no key at all, because the page holds it (see "Shipping to the web").
+- **`ravensight.enabled()`** is true only while the SDK is collecting: it
+  has a key (or the web bridge), and nobody switched it off (`enabled =
+  false`, the player, the server, or a refused key). Use it to skip work
+  that only feeds analytics.
+- **`consent = "opt_in"`** sends nothing until the player says yes:
+  no device id is made, no saved events are loaded and not even the
+  settings check is sent before `setTrackingEnabled(true)`. The yes is
+  saved as `ravensight_optin` in the save folder, and
+  `setTrackingEnabled(false)` removes it. The default, `"opt_out"`, keeps the
+  0.2.0 behaviour. `setTrackingEnabled` and `isTrackingEnabled` save and
+  report the choice even while inert or with `enabled = false`, so the
+  settings toggle always shows the right state.
+- **`distribution`** is a short label of your own, such as
+  `"native-release"`, `"web-pages"` or `"web-itch"`, sent on the session so
+  you can tell builds apart. It is not sent when unset. In a web build the
+  page's SDK opens the session, so this option has no effect there.
+- **`rs_event_id`** is added to every event's data: the first 16 characters
+  of the device id (on the web, a random value made once per launch), the
+  start time in hex, a random 4 hex character value made once per launch
+  and a counter. It is saved with a queued event, so an event sent again
+  after a restart carries the same id and can be recognised as the same
+  event.
+- **A refused key ends the run.** A 401 or 403 answer to the settings check
+  or to opening a session (other than the tracking switch and a refused
+  playtest token) means the key was revoked, rotated or is wrong, and a
+  retry cannot help. The SDK then stops for the rest of the run: tracking
+  off, queue cleared, nothing saved on quit, one error line, and
+  `tracking_disabled` fires with `"key"`.
+- **Jitter.** A failed request is retried after the backoff plus or minus
+  20 percent, so many copies of a game that lost the network together do
+  not come back together. Never sooner than half a second, never later than
+  5 minutes. A server's `Retry-After` is obeyed exactly.
+- **Events over 8,192 bytes** (as JSON) are dropped before they are queued,
+  with one warning line for the run and `flush_failed` with
+  `"event_too_large"` for each one.
+- **The quit hold** is unchanged: `ravensight.quit()` holds the quit for up
+  to 1.5 seconds to send the last events.
+
+What a request carries, exactly: the settings check sends only the
+`X-API-Key` header; the session sends `deviceId`, `gameVersion`, `platform`
+and, when set, `distribution`; a batch sends `events`, each with `event`,
+`data` and `timestamp`; feedback sends `message` and the optional
+`category` and `rating`. No file path, host name or command line argument
+is ever sent; the test suite checks every request for them.
+
+### On the web
+
+- **Opt-in pages.** Use the same consent mode on both sides:
+
+```js
+const enabled = ravensightLoveEnabled(undefined, { consent: 'opt_in' });
+const rs = new Ravensight({ ingestKey: 'gt_live_...', gameVersion: '1.0.0', enabled });
+if (enabled) rs.init();
+installRavensightBridge(rs, Module, { consent: 'opt_in' });
+Love(Module);
+```
+
+  With `consent: 'opt_in'`, `ravensightLoveEnabled` is true only when the
+  player said yes on an earlier visit, and false when `localStorage` is
+  missing or blocked (an iframe on a store page, for example). The player's
+  yes in the game prints an `enabled` line and the bridge starts the page's
+  SDK.
+- **No key.** `installRavensightBridge(null, Module)`, as above.
+- **Long lines.** A tagged line over 32 KB is not parsed; it goes to the
+  original print like any other line.
+- **The exit mailbox.** A browser tab can close before `love.quit` runs. To
+  send last events anyway, your game's own code (not the SDK) can keep a
+  JSON array of `{ "event": ..., "data": ... }` at
+  `/tmp/ravensight-exit.json`, the in-memory file system love.js provides,
+  replacing it whenever the state worth reporting changes:
+
+```lua
+local json = require("ravensight.json")
+
+local function setExitEvents(list)   -- e.g. { { event = "run_abandoned", data = { sector = 3 } } }
+  local f = io.open("/tmp/ravensight-exit.json", "w")
+  if f then f:write(json.encode(list)); f:close() end
+end
+```
+
+  On `pagehide` the bridge reads it through `Module.FS` (when present),
+  tracks each entry, removes the file and asks the page's SDK to flush. Its
+  listener uses the capture phase so it runs before the SDK's own `pagehide`
+  handling, which still sends `game_exited` as before. Nothing is sent from
+  the mailbox while the player has tracking off. It is best effort and never
+  throws into the page.
+
 ## Reference
 
 ### `ravensight.init(options)`
 
 | Option | Default | Notes |
 | --- | --- | --- |
-| `ingestKey` | required | Your game's `gt_live_` key. |
+| `ingestKey` | none | Your game's publishable key. Missing or empty, the SDK is inert on the desktop (see "Public builds"). Not needed in a web build. |
+| `optional` | `false` | `true` silences the one warning an inert start prints. |
+| `consent` | `"opt_out"` | `"opt_in"` sends nothing and makes no device id until `setTrackingEnabled(true)`. |
+| `distribution` | none | A short label sent on the session, such as `"native-release"`. |
 | `apiUrl` | `https://api.ravensight.io` | With or without `/api/v1`. |
 | `gameVersion` | `1.0.0` | Sent with every session. |
 | `enabled` | `true` | `false` sends and queues nothing for this run, and is not saved. `setTrackingEnabled` still saves the player's choice, and `isTrackingEnabled()` reports it, but neither turns the SDK on. |
@@ -200,9 +318,10 @@ It still records `game_exited` and tries to send it.
 | --- | --- |
 | `track(name, data)` | Queue an event. `data` is a flat table of strings, numbers and booleans. Safe before the session is ready. |
 | `flush()` | Send what is queued now instead of waiting for the timer. |
-| `submitFeedback(message, category, rating)` | Send player feedback. `category` is optional and one of `bug`, `suggestion`, `complaint`, `praise`, `playtest` or `other`; `rating` is optional and a whole number from 1 to 5. Needs an open session. Returns `true` when sent, or `false` and a reason (`"invalid_category"`, `"invalid_rating"`, `"no_session"`, `"empty_message"`, `"tracking_disabled"`, or `"not_started"` before `init` or with `enabled = false`) when refused before sending. |
-| `setTrackingEnabled(enabled)` | The player's opt-out, remembered across launches. `false` drops the queue and sends nothing, not even the startup check. |
-| `isTrackingEnabled()` | `false` when the player opted out or tracking is switched off for your game. |
+| `submitFeedback(message, category, rating)` | Send player feedback. `category` is optional and one of `bug`, `suggestion`, `complaint`, `praise`, `playtest` or `other`; `rating` is optional and a whole number from 1 to 5. Needs an open session. Returns `true` when sent, or `false` and a reason (`"invalid_category"`, `"invalid_rating"`, `"no_session"`, `"empty_message"`, `"tracking_disabled"`, or `"not_started"` before `init`, with `enabled = false` or while inert) when refused before sending. |
+| `setTrackingEnabled(enabled)` | The player's choice, remembered across launches. `false` drops the queue and sends nothing, not even the startup check. With `consent = "opt_in"`, `true` is the yes that starts everything. |
+| `isTrackingEnabled()` | `false` when the player opted out (or has not opted in), or tracking is switched off for your game. While inert or with `enabled = false`, the player's saved choice. |
+| `enabled()` | `true` only while the SDK is running and collecting. `false` when inert, with `enabled = false`, opted out, switched off by the server or after a refused key. |
 | `resetDeviceId()` | Start a fresh analytics identity for this install. |
 | `getDeviceId()` | This install's random id. |
 | `setPlaytestContext(ctx)` | Puts a running game into playtest mode. `ctx` needs `token` and `run_id` (plus optional `persona`, `job_id` and `tier`), the same values the playtest CLI passes as `RAVENSIGHT_PLAYTEST_*` variables; it uses a throwaway device id, ignores the player's opt-out, and tags every event as synthetic. `init` already does this when those variables are set, so a game never needs to call it by hand. |
@@ -217,9 +336,9 @@ It still records `game_exited` and tries to send it.
 | --- | --- | --- |
 | `session_ready` | | A session is open. |
 | `session_failed` | `reason` | Opening a session failed. It is retried for you. |
-| `tracking_disabled` | `source` | `"server"` when tracking is switched off for your game, `"player"` after an opt-out. |
+| `tracking_disabled` | `source` | `"server"` when tracking is switched off for your game, `"player"` after an opt-out (or at start with `consent = "opt_in"` before a yes), `"key"` when the key was refused and the run stops. |
 | `events_flushed` | `count` | A batch was accepted. |
-| `flush_failed` | `reason` | A batch failed. It is retried for you. |
+| `flush_failed` | `reason` | A batch failed. It is retried for you. `"event_too_large"`: one event was over 8,192 bytes and was dropped, not retried. |
 | `feedback_submitted` | | Feedback was accepted. |
 | `feedback_failed` | `reason` | Feedback failed, including `"no_session"` when sent too early, `"invalid_category"` and `"invalid_rating"`. |
 | `event_tracked` | `name, data` | Every queued event, with the data actually queued. |
@@ -236,7 +355,9 @@ end)
   name, generated from the operating system's random source on first launch
   and saved in your game's save folder. It is not derived from hardware or an
   account, and `resetDeviceId()` replaces it.
-- **The events you track**, with a timestamp, your game version and the OS.
+- **The events you track**, with a timestamp, your game version and the OS,
+  and an `rs_event_id` in each event's data (see "Public builds").
+- **Your `distribution` label**, if you set one.
 - **No advertising identifier, no names, no emails, no accounts.** There is
   no field for them.
 
@@ -245,7 +366,8 @@ That is why a game using it needs no tracking permission prompt. The
 has the exact answers for the store forms.
 
 Ravensight ships no consent screen. If your game shows one, wire it to
-`setTrackingEnabled` and `resetDeviceId` (see "Telling players" below).
+`setTrackingEnabled` and `resetDeviceId` (see "Telling players" below). To
+send nothing until the player agrees, pass `consent = "opt_in"`.
 
 ## Telling players
 
@@ -294,8 +416,12 @@ launch. `getTransport()` tells you which one is in use.
   quit, and when a session opens with events waiting. With `debug = true`
   each accepted batch prints `events_flushed N`.
 - Up to 50 events per request.
-- A failed request is retried after 10 seconds, doubling up to 5 minutes. A
-  "slow down" answer from the server is obeyed exactly.
+- A failed request is retried after 10 seconds, doubling up to 5 minutes,
+  each wait plus or minus 20 percent. A "slow down" answer from the server
+  is obeyed exactly.
+- A refused key (401 or 403 on the settings check or the session) stops the
+  SDK for the rest of the run instead of retrying.
+- An event over 8,192 bytes as JSON is dropped before it is queued.
 - If the server rejects one oversized event, the batch is split until that
   event is found and dropped, so it never costs the events around it.
 - Events still unsent when the game quits are saved and sent on the next
@@ -320,6 +446,7 @@ synthetic, so persona sessions never mix with real players.
 | `maxQueueSize` default | 500 | 500 |
 | `enabled` option | Yes | Yes |
 | Player opt-out | `setTrackingEnabled(false)`, saved | `setEnabled(false)` |
+| Opt-in consent | `consent = "opt_in"`, saved | Construct with `enabled: false`, then `setEnabled(true)` |
 | Batching | 2 seconds after the first waiting event, or at 50 events | On a timer, or at 50 events |
 | Web | Through the bridge to the JavaScript SDK | Runs on the page |
 

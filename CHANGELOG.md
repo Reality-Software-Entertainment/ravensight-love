@@ -1,5 +1,58 @@
 # Changelog
 
+## 0.3.0
+
+For games whose builds or source anyone can download. A game that passes a
+key and none of the new options behaves as on 0.2.0, except for the two
+changes listed first.
+
+### Changes for 0.2.0 games
+
+- A 401 or 403 answer to the settings check or to opening a session (other
+  than the tracking switch and a refused playtest token) now stops the SDK
+  for the rest of the run, with `tracking_disabled("key")`, instead of
+  retrying forever. The queue is cleared and nothing is saved on quit.
+- In a web build the Lua SDK now prints an `enabled` line at every start,
+  with the player's saved choice, not only after an opt-out. The page's SDK
+  is switched to match the game's saved choice.
+- Every event's data gains an `rs_event_id` key.
+- Retry waits carry plus or minus 20 percent jitter. `Retry-After` is still
+  obeyed exactly.
+- An event over 8,192 bytes as JSON is dropped before it is queued, with
+  one warning line and `flush_failed("event_too_large")`, instead of being
+  sent and split out by the server's 400.
+
+### What is new
+
+- **Inert without a key.** `init` with no `ingestKey` or an empty one no
+  longer raises an error off the web: it writes no files, makes no
+  request, prints one warning (`optional = true` silences it) and returns
+  `{ sessionReady = false, reason = "no_key" }`. A web build needs no key
+  in Lua at all, since the page holds it.
+- **`ravensight.enabled()`**, true only while the SDK is collecting.
+- **`consent = "opt_in"`**: no device id, saved queue or settings check
+  before `setTrackingEnabled(true)`; the yes is saved as
+  `ravensight_optin`. `"opt_out"` stays the default.
+- **`distribution`** option, sent on the session body when set.
+- **`rs_event_id`** on every event: the first 16 characters of the device id
+  (a per-launch random value on the web), the start time in hex, a
+  per-launch nonce and a counter. It is kept inside the event's data, so a
+  saved queue resends the same id.
+- `setTrackingEnabled` and `isTrackingEnabled` save and report the choice
+  in the file the consent mode reads, also while inert or with
+  `enabled = false`.
+- **Bridge.** `installRavensightBridge(null, Module)` is a sink for a
+  keyless page. `ravensightLoveEnabled(storage, { consent: 'opt_in' })`
+  and the bridge's `consent` option for opt-in pages; false when storage
+  is missing or blocked. Tagged lines over 32 KB print as ordinary lines.
+  The exit mailbox: a game's adapter keeps `/tmp/ravensight-exit.json`, and
+  the bridge tracks it on `pagehide` and flushes before the page's SDK sends
+  its own `game_exited`.
+- Tests pin the exact keys of every request body and header, and check
+  that no file path, host name or command line argument is sent.
+- README: "Public builds", and the compatibility row for 0.3.0 (the
+  JavaScript SDK floor stays 0.4.0).
+
 ## 0.2.0
 
 ### Changes for 0.1.0 games

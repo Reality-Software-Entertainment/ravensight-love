@@ -26,6 +26,10 @@ local function harness(opts)
     platform = 'macOS',
     osName = 'macos',
     playtest = opts.playtest,
+    consent = opts.consent,
+    distribution = opts.distribution,
+    -- 0.5 is no jitter at all, so the timing tests read exact numbers.
+    random = opts.random or function() return 0.5 end,
   })
   for _, name in ipairs({ 'session_ready', 'session_failed', 'tracking_disabled', 'events_flushed', 'flush_failed', 'feedback_submitted', 'feedback_failed' }) do
     h.core:on(name, function(...) table.insert(h.events, { name, ... }) end)
@@ -425,5 +429,279 @@ return {
     eq(h.logs[#h.logs], 'warn feedback_rejected invalid_rating good')
     eq(h.core:submitFeedback('hi', 'praise', 5), true)
     eq(json.decode(h.answer('/api/v1/feedback', 201).body).rating, 5)
+  end },
+
+  -- ------------------------------------------------------- 0.3.0: opt-in
+
+  { 'opt_in: nothing at all before the player says yes', function()
+    local h = harness({ consent = 'opt_in', files = { [Core.QUEUE_FILE] = '[{"event":"old","data":{},"timestamp":1}]' } })
+    h.core:start()
+    eq(#h.requests, 0, 'no settings call')
+    eq(h.core.deviceId, '', 'no device id')
+    eq(h.files[Core.DEVICE_ID_FILE], nil, 'no device id file')
+    eq(#h.core.pending, 0, 'the saved queue is not loaded')
+    eq(h.core:isTrackingEnabled(), false)
+    eq(h.fired('tracking_disabled')[2], 'player')
+    h.core:track('ignored', {})
+    eq(#h.core.pending, 0)
+    eq(h.core:beginQuit(), false)
+    eq(h.files[Core.DEVICE_ID_FILE], nil, 'quitting writes no id either')
+  end },
+  { 'opt_in: setTrackingEnabled(true) saves ravensight_optin, makes the id and starts', function()
+    local h = harness({ consent = 'opt_in' })
+    h.core:start()
+    h.core:setTrackingEnabled(true)
+    eq(h.files[Core.OPTIN_FILE], '1')
+    eq(h.files[Core.OPTOUT_FILE], nil)
+    eq(h.core.deviceId, string.rep('ab', 16) .. '-macos')
+    h.answer('/api/v1/settings', 200, { trackingEnabled = true })
+    h.openSession()
+    eq(h.batchBody(h.answer('/api/v1/track/batch', 202))[1].event, 'game_started')
+    -- The next launch remembers the yes.
+    local next = harness({ consent = 'opt_in', files = h.files })
+    next.boot()
+    eq(next.core.deviceId, h.core.deviceId)
+  end },
+  { 'opt_in: saying no again removes ravensight_optin and stops', function()
+    local h = harness({ consent = 'opt_in', files = { [Core.OPTIN_FILE] = '1' } })
+    h.boot()
+    h.core:setTrackingEnabled(false)
+    eq(h.files[Core.OPTIN_FILE], nil)
+    eq(h.files[Core.OPTOUT_FILE], nil, 'opt_in never writes the opt-out file')
+    eq(h.core:isTrackingEnabled(), false)
+  end },
+  { 'opt_in: resetDeviceId before a yes makes no id', function()
+    local h = harness({ consent = 'opt_in', files = { [Core.DEVICE_ID_FILE] = string.rep('cd', 16) .. '-macos' } })
+    h.core:start()
+    h.core:resetDeviceId()
+    eq(h.files[Core.DEVICE_ID_FILE], nil)
+    eq(h.core.deviceId, '')
+  end },
+  { 'opt_out stays the default and reads only ravensight_optout', function()
+    local h = harness({ files = { [Core.OPTIN_FILE] = '1' } })
+    eq(h.core.consent, 'opt_out')
+    h.boot()
+    eq(h.core:isTrackingEnabled(), true)
+    local unknown = harness({ consent = 'something' })
+    eq(unknown.core.consent, 'opt_out')
+  end },
+
+  -- ------------------------------------------------- 0.3.0: distribution
+
+  { 'distribution is sent on the session body only when set', function()
+    local h = harness({ distribution = 'web-itch' })
+    h.boot()
+    eq(json.decode(h.openSession().body).distribution, 'web-itch')
+    local plain = harness()
+    plain.boot()
+    eq(json.decode(plain.openSession().body).distribution, nil)
+  end },
+
+  -- ---------------------------------------------- 0.3.0: a refused key
+
+  { 'a 401 on settings ends the run: no session, no retry, nothing saved', function()
+    local h = harness({ files = { [Core.QUEUE_FILE] = '[{"event":"old","data":{},"timestamp":1}]' } })
+    h.core:start()
+    eq(#h.core.pending, 1, 'the saved queue was loaded')
+    h.answer('/api/v1/settings', 401, { error = 'invalid_api_key' })
+    eq(#h.requests, 0)
+    eq(h.core:isTrackingEnabled(), false)
+    eq(#h.core.pending, 0, 'the queue is cleared')
+    eq(h.fired('tracking_disabled')[2], 'key')
+    h.core:track('more', {})
+    for t = 1, 400, 10 do h.clock = t; h.core:update() end
+    eq(#h.requests, 0, 'never retried')
+    eq(h.core:beginQuit(), false)
+    eq(h.files[Core.QUEUE_FILE], nil, 'nothing saved on quit')
+    local logged = 0
+    for _, line in ipairs(h.logs) do if line:find('ingest key was refused', 1, true) then logged = logged + 1 end end
+    eq(logged, 1, 'logged once')
+  end },
+  { 'a 403 on settings that is not the kill switch also ends the run', function()
+    local h = harness()
+    h.core:start()
+    h.answer('/api/v1/settings', 403, { error = 'key_revoked' })
+    eq(h.fired('tracking_disabled')[2], 'key')
+    eq(#h.requests, 0)
+  end },
+  { 'a 403 tracking_disabled on settings is the kill switch, not a key refusal', function()
+    local h = harness()
+    h.core:start()
+    h.answer('/api/v1/settings', 403, { error = 'tracking_disabled' })
+    eq(h.fired('tracking_disabled')[2], 'server')
+  end },
+  { 'a 401 or 403 on the session ends the run and is never retried', function()
+    for _, status in ipairs({ 401, 403 }) do
+      local h = harness()
+      h.boot()
+      h.answer('/api/v1/session', status, { error = 'invalid_api_key' })
+      eq(h.fired('session_failed')[2], 'invalid_api_key')
+      eq(h.fired('tracking_disabled')[2], 'key', tostring(status))
+      eq(h.core.retryAt, nil)
+      h.core:track('x', {})
+      h.clock = 1000; h.core:update()
+      eq(#h.requests, 0, tostring(status))
+      -- The player's choice is still saved, but nothing restarts.
+      h.core:setTrackingEnabled(false)
+      h.core:setTrackingEnabled(true)
+      eq(h.files[Core.OPTOUT_FILE], nil)
+      eq(#h.requests, 0)
+    end
+  end },
+  { 'playtest refusals and the kill switch keep their 0.2.0 meaning on the session', function()
+    local h = harness({ playtest = { token = 'bad', run_id = 'r' } })
+    h.boot()
+    h.answer('/api/v1/session', 403, { error = 'playtest_job_closed' })
+    eq(h.fired('tracking_disabled'), nil)
+    local k = harness()
+    k.boot()
+    k.answer('/api/v1/session', 403, { error = 'tracking_disabled' })
+    eq(k.fired('tracking_disabled')[2], 'server')
+  end },
+  { 'a refused key while quitting releases the quit at once', function()
+    local h = harness()
+    h.boot()
+    h.core:track('last', {})
+    eq(h.core:beginQuit(), true)
+    h.answer('/api/v1/session', 401)
+    eq(h.core.quitReady, true)
+    eq(h.files[Core.QUEUE_FILE], nil)
+  end },
+
+  -- --------------------------------------------------- 0.3.0: jitter
+
+  { 'backoff carries plus or minus 20 percent jitter from deps.random', function()
+    local low = harness({ random = function() return 0 end })
+    low.boot(); low.openSession()
+    low.answer('/api/v1/track/batch', 500)
+    eq(low.core.retryAt, 8)
+    local high = harness({ random = function() return 1 end })
+    high.boot(); high.openSession()
+    high.answer('/api/v1/track/batch', 500)
+    assert(math.abs(high.core.retryAt - 12) < 1e-9, 'expected 12, got ' .. high.core.retryAt)
+  end },
+  { 'jitter never takes a wait past 5 minutes or under half a second', function()
+    local h = harness({ random = function() return 1 end })
+    h.boot(); h.openSession()
+    h.core.backoff = 300
+    h.answer('/api/v1/track/batch', 500)
+    eq(h.core.retryAt, 300)
+    local tiny = harness({ random = function() return 0 end })
+    tiny.boot(); tiny.openSession()
+    tiny.core.backoff = 0.1
+    tiny.answer('/api/v1/track/batch', 500)
+    eq(tiny.core.retryAt, 0.5)
+  end },
+  { 'Retry-After is obeyed exactly, with no jitter', function()
+    local h = harness({ random = function() return 1 end })
+    h.boot(); h.openSession()
+    h.answer('/api/v1/track/batch', 429, { error = 'quota_exceeded' }, { ['retry-after'] = '42' })
+    eq(h.core.retryAt, 42)
+  end },
+
+  -- ------------------------------------------------ 0.3.0: rs_event_id
+
+  { 'every event carries a distinct rs_event_id and the caller table is untouched', function()
+    local h = harness()
+    h.boot()
+    local caller = { a = 1 }
+    h.core:track('one', caller)
+    h.core:track('two', caller)
+    eq(caller.rs_event_id, nil)
+    h.openSession()
+    local events = h.batchBody(h.answer('/api/v1/track/batch', 202))
+    local prefix = string.rep('ab', 8) .. '-' .. string.format('%x', 1800000000) .. '-abab-'
+    eq(events[1].data.rs_event_id, prefix .. '1', 'game_started')
+    eq(events[2].data.rs_event_id, prefix .. '2')
+    eq(events[3].data.rs_event_id, prefix .. '3')
+  end },
+  { 'rs_event_id survives a saved queue and a reload', function()
+    local h = harness()
+    h.core:start()
+    h.answer('/api/v1/settings', 0)
+    h.core:track('offline', {})
+    h.answer('/api/v1/session', 0)
+    h.core:beginQuit()
+    local ids = {}
+    for _, e in ipairs(json.decode(h.files[Core.QUEUE_FILE])) do ids[e.event] = e.data.rs_event_id end
+    assert(ids.offline, 'saved with its id')
+    local next = harness({ files = h.files })
+    next.core.randomHex = function(n) return string.rep('cd', n) end   -- another launch, another nonce
+    next.boot()
+    next.openSession()
+    local sent = {}
+    for _, e in ipairs(next.batchBody(next.answer('/api/v1/track/batch', 202))) do sent[#sent + 1] = e end
+    eq(sent[2].event, 'offline')
+    eq(sent[2].data.rs_event_id, ids.offline)
+    assert(sent[4].data.rs_event_id ~= ids.game_started, 'a new launch makes new ids')
+  end },
+  { 'a playtest event id starts with the throwaway id', function()
+    local h = harness({ playtest = { token = 't', run_id = 'run9' } })
+    h.boot()
+    eq(h.core.pending[1].data.rs_event_id:sub(1, 8), 'pt-run9-')
+  end },
+
+  -- ------------------------------------------ 0.3.0: oversized events
+
+  { 'an event over 8,192 bytes is dropped with one warning and flush_failed', function()
+    local h = harness()
+    h.boot()
+    local tracked = 0
+    h.core:on('event_tracked', function() tracked = tracked + 1 end)
+    h.core:track('huge', { blob = string.rep('x', 9000) })
+    h.core:track('huge', { blob = string.rep('x', 9000) })
+    eq(#h.core.pending, 1, 'only game_started is queued')
+    eq(tracked, 0, 'no event_tracked for a dropped event')
+    local failures, warnings = 0, 0
+    for _, e in ipairs(h.events) do if e[1] == 'flush_failed' and e[2] == 'event_too_large' then failures = failures + 1 end end
+    for _, line in ipairs(h.logs) do if line:find('dropped event "huge"', 1, true) then warnings = warnings + 1 end end
+    eq(failures, 2); eq(warnings, 1)
+    -- Just under the limit is kept.
+    local name, data = 'fits', { blob = '' }
+    data.rs_event_id = Core.eventId(h.core.deviceId, h.core.startTime, 'abab', 4)
+    local room = Core.MAX_EVENT_BYTES - Core.eventBytes(name, data, 1800000000)
+    h.core:track(name, { blob = string.rep('y', room) })
+    eq(#h.core.pending, 2)
+    eq(Core.eventBytes('fits', h.core.pending[2].data, 1800000000), Core.MAX_EVENT_BYTES)
+  end },
+
+  -- ------------------------------------------ 0.3.0: what leaves, exactly
+
+  { 'every outgoing request has exactly the documented keys and headers', function()
+    local h = harness({ distribution = 'native-release' })
+    local function keys(t)
+      local out = {}
+      for k in pairs(t or {}) do out[#out + 1] = k end
+      table.sort(out)
+      return table.concat(out, ',')
+    end
+    h.core:start()
+    local settings = h.answer('/api/v1/settings', 200, { trackingEnabled = true })
+    eq(keys(settings), 'headers,method,url')
+    eq(settings.method, 'GET')
+    eq(settings.url, 'https://api.test/api/v1/settings')
+    eq(keys(settings.headers), 'X-API-Key')
+
+    h.core:track('level_start', { level = 'forest_1' })
+    local session = h.openSession()
+    eq(keys(session), 'body,headers,method,url')
+    eq(session.url, 'https://api.test/api/v1/session')
+    eq(keys(session.headers), 'Content-Type,X-API-Key')
+    eq(keys(json.decode(session.body)), 'deviceId,distribution,gameVersion,platform')
+
+    local batch = h.answer('/api/v1/track/batch', 202)
+    eq(batch.url, 'https://api.test/api/v1/track/batch')
+    eq(keys(batch.headers), 'Content-Type,X-Session-Token')
+    local body = json.decode(batch.body)
+    eq(keys(body), 'events')
+    for _, e in ipairs(body.events) do eq(keys(e), 'data,event,timestamp') end
+    eq(keys(body.events[1].data), 'rs_event_id')
+    eq(keys(body.events[2].data), 'level,rs_event_id')
+
+    h.core:submitFeedback('hi', 'bug', 3)
+    local feedback = h.answer('/api/v1/feedback', 201)
+    eq(feedback.url, 'https://api.test/api/v1/feedback')
+    eq(keys(feedback.headers), 'Content-Type,X-Session-Token')
+    eq(keys(json.decode(feedback.body)), 'category,message,rating')
   end },
 }

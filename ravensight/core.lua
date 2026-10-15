@@ -17,9 +17,11 @@
 --   * a 400 batch is halved until the one bad event is isolated and dropped
 --   * the player's opt-out is saved and honoured before anything is sent
 --
--- One addition: events still queued when the game quits are saved and sent
--- on the next launch, because a LÖVE game on a desktop is often closed while
--- offline.
+-- Additions: events still queued when the game quits are saved and sent on
+-- the next launch, because a LÖVE game on a desktop is often closed while
+-- offline; consent = "opt_in" sends nothing at all until the player says
+-- yes; a refused key (401 or 403) ends the run instead of retrying; every
+-- event carries an rs_event_id so a resend can be recognised.
 --
 -- MIT licensed, part of ravensight-love.
 
@@ -28,13 +30,18 @@ local json = require(((...):gsub('core$', 'json')))
 local Core = {}
 Core.__index = Core
 
-Core.VERSION = '0.2.0'
+Core.VERSION = '0.3.0'
 Core.MAX_BATCH_SIZE = 50
 Core.DEFAULT_RETRY_SECONDS = 10
 Core.MAX_BACKOFF_SECONDS = 300
 Core.QUIT_FLUSH_TIMEOUT_SECONDS = 1.5
 Core.DEFAULT_FLUSH_INTERVAL_SECONDS = 2
 Core.DEFAULT_MAX_QUEUE_SIZE = 500
+Core.MIN_RETRY_SECONDS = 0.5
+Core.JITTER = 0.2
+--- The largest event the API accepts, measured as the JSON of
+--- {event, data, timestamp}. Bigger events are dropped before queueing.
+Core.MAX_EVENT_BYTES = 8192
 
 --- The categories the feedback endpoint accepts. Anything else is refused
 --- before it is sent.
@@ -45,6 +52,45 @@ Core.FEEDBACK_CATEGORIES = {
 Core.DEVICE_ID_FILE = 'ravensight_device_id'
 Core.OPTOUT_FILE = 'ravensight_optout'
 Core.QUEUE_FILE = 'ravensight_queue.json'
+--- Written only with consent = "opt_in", once the player has said yes.
+Core.OPTIN_FILE = 'ravensight_optin'
+
+Core.CONSENT_OPT_OUT = 'opt_out'
+Core.CONSENT_OPT_IN = 'opt_in'
+
+--- "opt_in" or "opt_out" from an option value; anything else is opt_out.
+function Core.normalizeConsent(value)
+  if value == Core.CONSENT_OPT_IN then return Core.CONSENT_OPT_IN end
+  return Core.CONSENT_OPT_OUT
+end
+
+--- The player's saved choice for a consent mode, read from storage: true
+--- when tracking may run. opt_out: on unless an opt-out was saved. opt_in:
+--- off unless an opt-in was saved.
+function Core.savedChoice(storage, consent)
+  if consent == Core.CONSENT_OPT_IN then return storage.read(Core.OPTIN_FILE) ~= nil end
+  return storage.read(Core.OPTOUT_FILE) == nil
+end
+
+--- Saves the player's choice in the file the consent mode reads.
+function Core.saveChoice(storage, consent, enabled)
+  if consent == Core.CONSENT_OPT_IN then
+    if enabled then storage.write(Core.OPTIN_FILE, '1') else storage.remove(Core.OPTIN_FILE) end
+  else
+    if enabled then storage.remove(Core.OPTOUT_FILE) else storage.write(Core.OPTOUT_FILE, '1') end
+  end
+end
+
+--- Builds an event id from its parts: the first 16 characters of the device
+--- id, the start time in hex, a per-launch nonce and a counter.
+function Core.eventId(deviceId, startTime, nonce, counter)
+  return string.format('%s-%x-%s-%d', tostring(deviceId or ''):sub(1, 16), math.floor(tonumber(startTime) or 0), nonce, counter)
+end
+
+--- The serialized size of one queued event, as the batch will send it.
+function Core.eventBytes(name, data, timestamp)
+  return #json.encode({ event = name, data = data, timestamp = timestamp })
+end
 
 local EVENTS = {
   session_ready = true, session_failed = true, tracking_disabled = true,
@@ -77,6 +123,10 @@ end
 ---   platform, osName                e.g. "macOS" and "macos"
 ---   log(level, message)             "info", "warn" or "error"
 ---   playtest                        {token, run_id, job_id, persona, tier} or nil
+---   consent                         "opt_out" (default) or "opt_in"
+---   distribution                    optional string sent on the session
+---   random()                        0 <= x < 1, for backoff jitter,
+---                                   default math.random
 function Core.new(deps)
   assert(type(deps) == 'table', 'ravensight: core needs its dependencies')
   local self = setmetatable({}, Core)
@@ -93,6 +143,11 @@ function Core.new(deps)
   self.platform = deps.platform or 'unknown'
   self.osName = deps.osName or 'unknown'
   self.log = deps.log or noop
+  self.random = deps.random or math.random
+  self.consent = Core.normalizeConsent(deps.consent)
+  if type(deps.distribution) == 'string' and deps.distribution ~= '' then
+    self.distribution = deps.distribution
+  end
 
   self.listeners = {}
   self.deviceId = ''
@@ -114,6 +169,12 @@ function Core.new(deps)
   self.quitDeadline = nil
   self.quitReady = false
   self.started = false
+  self.identityLoaded = false
+  self.keyRefused = false
+  self.startTime = nil
+  self.eventNonce = nil
+  self.eventCounter = 0
+  self.warnedTooLarge = false
 
   self.playtestToken = ''
   self.playtestRunId = ''
@@ -159,19 +220,32 @@ end
 function Core:start()
   if self.started then return end
   self.started = true
+  self.startTime = self.time()
   if self.playtestToken == '' then
-    self.deviceId = self:loadOrCreateDeviceId()
-    self.playerOptedOut = self.storage.read(Core.OPTOUT_FILE) ~= nil
+    self.playerOptedOut = not Core.savedChoice(self.storage, self.consent)
     self.trackingEnabled = not self.playerOptedOut
-    if not self.playerOptedOut then self:loadSavedQueue() end
+    -- With opt_in and no yes yet, not even the device id is created.
+    if not self.playerOptedOut then self:loadIdentity() end
   end
   if self.playerOptedOut then
     -- Nothing leaves the device, not even the settings check.
-    self.log('info', 'tracking disabled by player opt-out')
+    if self.consent == Core.CONSENT_OPT_IN then
+      self.log('info', 'waiting for the player to opt in (consent = "opt_in")')
+    else
+      self.log('info', 'tracking disabled by player opt-out')
+    end
     self:emit('tracking_disabled', 'player')
   else
     self:checkServerSettings()
   end
+end
+
+--- The saved device id (made on first use) and any saved queue.
+function Core:loadIdentity()
+  if self.identityLoaded or self.playtestToken ~= '' then return end
+  self.identityLoaded = true
+  self.deviceId = self:loadOrCreateDeviceId()
+  self:loadSavedQueue()
 end
 
 function Core:loadOrCreateDeviceId()
@@ -246,16 +320,23 @@ end
 -- ------------------------------------------------------------- kill switch
 
 function Core:checkServerSettings()
+  if self.keyRefused then return end
   self.send({
     method = 'GET',
     url = self.apiUrl .. '/api/v1/settings',
     headers = { ['X-API-Key'] = self.ingestKey },
   }, function(status, body)
+    if self.keyRefused then return end
     if status == 200 then
       local parsed = json.decode(body or '')
       if type(parsed) == 'table' and parsed.trackingEnabled ~= nil then
         self.serverTrackingEnabled = parsed.trackingEnabled == true
       end
+    elseif status == 403 and Core.errorOf(body) == 'tracking_disabled' then
+      self.serverTrackingEnabled = false
+    elseif status == 401 or status == 403 then
+      self:onKeyRefused(status, body)
+      return
     else
       self.log('warn', 'could not fetch settings (HTTP ' .. tostring(status) .. '); assuming tracking enabled')
     end
@@ -264,6 +345,7 @@ function Core:checkServerSettings()
 end
 
 function Core:afterSettingsChecked()
+  if self.keyRefused then return end
   self.trackingEnabled = self.serverTrackingEnabled and not self.playerOptedOut
   if not self.serverTrackingEnabled then
     self.log('info', 'tracking disabled by server kill switch')
@@ -292,11 +374,13 @@ function Core:startSession()
     headers['X-Ravensight-Playtest'] = self.playtestToken
     platform = 'ravensight-playtest'
   end
+  local body = { deviceId = self.deviceId, gameVersion = self.gameVersion, platform = platform }
+  if self.distribution then body.distribution = self.distribution end
   self.send({
     method = 'POST',
     url = self.apiUrl .. '/api/v1/session',
     headers = headers,
-    body = json.encode({ deviceId = self.deviceId, gameVersion = self.gameVersion, platform = platform }),
+    body = json.encode(body),
   }, function(status, body, responseHeaders)
     self:onSessionResponse(status, body, responseHeaders, generation)
   end)
@@ -306,6 +390,11 @@ local function extractError(body, fallback)
   local parsed = json.decode(body or '')
   if type(parsed) == 'table' and parsed.error ~= nil then return tostring(parsed.error) end
   return fallback
+end
+
+--- The `error` field of a JSON answer, or '' when there is none.
+function Core.errorOf(body)
+  return extractError(body, '')
 end
 
 local function retryAfter(headers)
@@ -347,6 +436,12 @@ function Core:onSessionResponse(status, body, headers, generation)
     self:emit('session_failed', 'tracking_disabled')
     self:onServerTrackingDisabled()
     return
+  elseif status == 401 or status == 403 then
+    -- The key itself was refused (revoked, rotated, wrong): retrying cannot
+    -- help, so the run ends here.
+    self:emit('session_failed', extractError(body, 'http_' .. tostring(status)))
+    self:onKeyRefused(status, body)
+    return
   else
     local reason = extractError(body, status == 0 and 'network_error' or ('http_' .. tostring(status)))
     self.log('error', 'session creation failed (' .. reason .. ')')
@@ -358,10 +453,20 @@ function Core:onSessionResponse(status, body, headers, generation)
   if self.quitting and status ~= 201 then self:finishQuit() end
 end
 
+--- Schedules the next attempt. A server's Retry-After is obeyed exactly;
+--- otherwise the wait is the backoff with plus or minus 20 percent jitter,
+--- so many games that failed together do not retry together. Never less
+--- than half a second; a jittered wait never more than 5 minutes.
 function Core:scheduleRetry(explicitWait)
-  local wait = (explicitWait and explicitWait > 0) and explicitWait or self.backoff
+  local wait
+  if explicitWait and explicitWait > 0 then
+    wait = explicitWait
+  else
+    local factor = 1 - Core.JITTER + 2 * Core.JITTER * self.random()
+    wait = math.min(self.backoff * factor, Core.MAX_BACKOFF_SECONDS)
+  end
   self.backoff = math.min(self.backoff * 2, Core.MAX_BACKOFF_SECONDS)
-  self.retryAt = self.now() + math.max(wait, 0.5)
+  self.retryAt = self.now() + math.max(wait, Core.MIN_RETRY_SECONDS)
 end
 
 -- ---------------------------------------------------------------- tracking
@@ -374,6 +479,7 @@ function Core:track(name, data)
     error('ravensight.track: data must be a table or nil', 2)
   end
   local queued = self:enqueue(name, data or {})
+  if not queued then return end
   self:emit('event_tracked', name, queued)
 
   -- A retry wait is running: let it send, so backoff and Retry-After hold.
@@ -393,17 +499,35 @@ local function shallowCopy(t)
   return out
 end
 
+--- The next rs_event_id: unique per event, and kept inside the event's data
+--- so a saved and reloaded queue resends the same id.
+function Core:nextEventId()
+  if not self.eventNonce then self.eventNonce = self.randomHex(2) end
+  self.eventCounter = self.eventCounter + 1
+  return Core.eventId(self.deviceId, self.startTime or self.time(), self.eventNonce, self.eventCounter)
+end
+
+--- Queues one event, or returns nil when it is too large to send.
 function Core:enqueue(name, data)
+  -- Never mutate the caller's table.
+  local eventData = shallowCopy(data)
+  if self.playtestTags then
+    for k, v in pairs(self.playtestTags) do eventData[k] = v end
+  end
+  eventData.rs_event_id = self:nextEventId()
+  local timestamp = self.time()
+  if Core.eventBytes(name, eventData, timestamp) > Core.MAX_EVENT_BYTES then
+    if not self.warnedTooLarge then
+      self.warnedTooLarge = true
+      self.log('warn', 'dropped event "' .. name .. '": larger than ' .. Core.MAX_EVENT_BYTES .. ' bytes as JSON (further drops are not logged)')
+    end
+    self:emit('flush_failed', 'event_too_large')
+    return nil
+  end
   while #self.pending >= self.maxQueueSize do
     table.remove(self.pending, 1)
   end
-  local eventData = data
-  if self.playtestTags then
-    -- Never mutate the caller's table.
-    eventData = shallowCopy(data)
-    for k, v in pairs(self.playtestTags) do eventData[k] = v end
-  end
-  table.insert(self.pending, { event = name, data = eventData, timestamp = self.time() })
+  table.insert(self.pending, { event = name, data = eventData, timestamp = timestamp })
   if not self.firstQueuedAt then self.firstQueuedAt = self.now() end
   return eventData
 end
@@ -562,7 +686,7 @@ function Core:setTrackingEnabled(enabled)
   if enabled and not self.playerOptedOut then return end
   self.playerOptedOut = not enabled
   if self.playerOptedOut then
-    self.storage.write(Core.OPTOUT_FILE, '1')
+    Core.saveChoice(self.storage, self.consent, false)
     self.trackingEnabled = false
     self:dropSession()
     self:clearQueue()
@@ -571,7 +695,13 @@ function Core:setTrackingEnabled(enabled)
     self.log('info', 'tracking disabled by player opt-out')
     self:emit('tracking_disabled', 'player')
   else
-    self.storage.remove(Core.OPTOUT_FILE)
+    Core.saveChoice(self.storage, self.consent, true)
+    -- With opt_in this is the first moment an id may exist.
+    self:loadIdentity()
+    if self.keyRefused then
+      self.log('info', 'the choice is saved; the key was refused, so nothing is sent this run')
+      return
+    end
     self:checkServerSettings()
   end
 end
@@ -584,6 +714,15 @@ end
 --- in a playtest run, whose id is never saved.
 function Core:resetDeviceId()
   if self.playtestToken ~= '' then return end
+  if self.consent == Core.CONSENT_OPT_IN and self.playerOptedOut then
+    -- Not opted in: forget any old id and make none until the player says yes.
+    self.storage.remove(Core.DEVICE_ID_FILE)
+    self.storage.remove(Core.QUEUE_FILE)
+    self.deviceId = ''
+    self.identityLoaded = false
+    self:clearQueue()
+    return
+  end
   self.storage.remove(Core.DEVICE_ID_FILE)
   self.deviceId = self:generateDeviceId()
   self.storage.write(Core.DEVICE_ID_FILE, self.deviceId)
@@ -607,6 +746,21 @@ function Core:clearQueue()
   self.splitBatchSize = 0
 end
 
+--- The ingest key was refused (401, or 403 that is not the kill switch or a
+--- playtest refusal). Tracking stops for the rest of the process: no retry
+--- loop on a revoked key, an empty queue, and nothing saved on quit.
+function Core:onKeyRefused(status, body)
+  if self.keyRefused then return end
+  self.keyRefused = true
+  self.trackingEnabled = false
+  self:dropSession()
+  self:clearQueue()
+  self.retryAt = nil
+  self.log('error', 'the ingest key was refused (HTTP ' .. tostring(status) .. ', ' .. extractError(body, 'no reason given') .. '); nothing more is sent this run')
+  self:emit('tracking_disabled', 'key')
+  if self.quitting then self:finishQuit() end
+end
+
 function Core:onServerTrackingDisabled()
   self.serverTrackingEnabled = false
   self.trackingEnabled = false
@@ -627,6 +781,7 @@ function Core:loadSavedQueue()
   local saved = json.decode(text)
   if type(saved) ~= 'table' then return end
   for _, e in ipairs(saved) do
+    -- Each event keeps its rs_event_id: it lives inside data.
     if type(e) == 'table' and type(e.event) == 'string' and type(e.timestamp) == 'number' then
       table.insert(self.pending, { event = e.event, data = type(e.data) == 'table' and e.data or {}, timestamp = e.timestamp })
     end

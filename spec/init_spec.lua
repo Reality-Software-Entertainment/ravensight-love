@@ -137,7 +137,7 @@ return {
       w.sdk.flush()
       eq(#w.lines, before, 'flush is silent while opted out')
       eq(w.sdk.quit(), false)
-      eq(#w.after(), 2, 'quit sends no game_exited from Lua (flush, then enabled)')
+      eq(#w.after(), 3, 'config, flush, then enabled; quit sends no extra event')
     end)
   end },
   { 'enabled = false in a web build returns nil and prints nothing', function()
@@ -352,7 +352,7 @@ return {
       for _, req in ipairs(sent) do
         local path = req.url:match('^https://api%.ravensight%.io(/.*)$')
         assert(path, 'only the API is called: ' .. req.url)
-        seen[#seen + 1] = req.method .. ' ' .. path
+        seen[#seen + 1] = req.method .. ' ' .. path:gsub('%?.*$', '')
         local body = req.body and json.decode(req.body)
         if path == '/api/v1/settings' then
           eq(keys(req.headers), 'X-API-Key'); eq(req.body, nil)
@@ -367,6 +367,9 @@ return {
             local d = keys(e.data)
             assert(d == 'rs_event_id' or d == 'level,rs_event_id', d)
           end
+        elseif path:find('/api/v1/ingest/config?', 1, true) == 1 then
+          eq(keys(req.headers), 'X-API-Key'); eq(req.body, nil)
+          assert(path:match('deviceId=[a-f0-9]+%-macos&platform=macOS&gameVersion=1%.0%.0$'))
         elseif path == '/api/v1/feedback' then
           eq(keys(req.headers), 'Content-Type,X-Session-Token')
           eq(keys(body), 'category,message,rating')
@@ -384,7 +387,7 @@ return {
           end
         end
       end
-      eq(table.concat(seen, ' | '), 'GET /api/v1/settings | POST /api/v1/session | POST /api/v1/track/batch | POST /api/v1/track/batch | POST /api/v1/feedback')
+      eq(table.concat(seen, ' | '), 'GET /api/v1/settings | POST /api/v1/session | POST /api/v1/track/batch | GET /api/v1/ingest/config | POST /api/v1/track/batch | POST /api/v1/feedback')
     end)
   end },
 
@@ -495,22 +498,24 @@ return {
       w.sdk.init({ ingestKey = 'gt_live_k', performance = true })
       for _ = 1, 3 do w.sdk.update(1) end
       local ops = w.after()
+      eq(ops[1].op, 'config', 'initial config fetch')
+      table.remove(ops, 1)
       eq(#ops, 1, 'first stash after the third sampled second')
       eq(ops[1].op, 'health')
       eq(ops[1].data.rs_kind, 'health'); eq(ops[1].data.rs_fps_median, 1)
       assert(ops[1].data.rs_event_id, 'carries an event id')
       eq(ops[1].data.rs_memory_mb, nil, 'no memory figure on the web')
       for _ = 1, 10 do w.sdk.update(1) end
-      eq(#w.after(), 2, 'refreshed at ten samples, not every second')
+      eq(#w.after(), 3, 'config plus two health samples')
       eq(w.sdk.quit(), false)
-      eq(#w.after(), 2, 'quit prints nothing more on the web')
+      eq(#w.after(), 3, 'quit prints nothing more on the web')
     end)
   end },
   { 'web: health is silent while opted out and without performance', function()
     run('Web', nil, function(w)
       w.sdk.init({ ingestKey = 'gt_live_k' })
       for _ = 1, 5 do w.sdk.update(1) end
-      eq(#w.after(), 0)
+      eq(#w.after(), 1); eq(w.after()[1].op, 'config')
     end)
     run('Web', nil, function(w)
       w.sdk.init({ ingestKey = 'gt_live_k', performance = true })

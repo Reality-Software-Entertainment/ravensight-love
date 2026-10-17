@@ -491,3 +491,27 @@ test('health: the sink swallows the line and a throwing track never breaks pageh
   assert.deepEqual(calls, [['flush']]);
   assert.equal(warn.mock.callCount(), 1);
 });
+
+test('config bridge writes only bounded replies for valid request identities', async () => {
+  const { rs } = fakeRs(); const written = [];
+  rs.fetchConfig = async () => ({ source: 'network', values: { speed: 3 } });
+  const Module = { print() {}, FS: { writeFile: (...args) => written.push(args) } };
+  installRavensightBridge(rs, Module, { storage: null, window: null });
+  const id = 'a'.repeat(32) + ':1';
+  Module.print(line({ v: 1, op: 'config', id }));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(written, [['/tmp/ravensight-config.json', JSON.stringify({ id, source: 'network', values: { speed: 3 } })]]);
+  Module.print(line({ v: 1, op: 'config', id: '../../bad' }));
+  await new Promise(resolve => setImmediate(resolve)); assert.equal(written.length, 1);
+});
+
+test('config bridge drops pending replies when the player opts out', async () => {
+  const { rs } = fakeRs(); const written = []; let finish;
+  rs.fetchConfig = () => new Promise(resolve => { finish = resolve; });
+  const Module = { print() {}, FS: { writeFile: (...args) => written.push(args) } };
+  installRavensightBridge(rs, Module, { storage: null, window: null });
+  Module.print(line({ v: 1, op: 'config', id: 'a'.repeat(32) + ':1' }));
+  Module.print(line({ v: 1, op: 'enabled', value: false }));
+  finish({ source: 'network', values: { speed: 3 } });
+  await new Promise(resolve => setImmediate(resolve)); assert.equal(written.length, 0);
+});

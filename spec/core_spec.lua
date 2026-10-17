@@ -14,7 +14,12 @@ local function harness(opts)
     gameVersion = '2.0.0',
     maxQueueSize = opts.maxQueueSize,
     log = function(level, message) table.insert(h.logs, level .. ' ' .. message) end,
-    send = function(req, cb) table.insert(h.requests, { req = req, cb = cb }) end,
+    send = function(req, cb)
+      -- Unavailable config must not alter the established event lifecycle.
+      -- Full config transport/cache cases live in config_spec.lua.
+      if req.url:find('/ingest/config?', 1, true) then cb(404, '{}', {}) return end
+      table.insert(h.requests, { req = req, cb = cb })
+    end,
     now = function() return h.clock end,
     time = function() return h.wall end,
     storage = {

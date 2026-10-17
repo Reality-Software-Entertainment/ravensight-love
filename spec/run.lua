@@ -5,7 +5,7 @@
 
 package.path = './?.lua;./?/init.lua;' .. package.path
 
-local files = { 'spec/json_spec.lua', 'spec/transport_spec.lua', 'spec/core_spec.lua', 'spec/typed_spec.lua', 'spec/init_spec.lua' }
+local files = { 'spec/config_spec.lua', 'spec/json_spec.lua', 'spec/transport_spec.lua', 'spec/core_spec.lua', 'spec/typed_spec.lua', 'spec/init_spec.lua' }
 local passed, failed = 0, 0
 
 for _, file in ipairs(files) do

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.1 (held)
+
+- Add desktop session-start config, bounded scoped cache, ETags, strict fallback getters and config_ready callbacks.
+- Automatically attach active experiment labels to newly tracked events.
+- Add request-bound public config replies through the love.js virtual filesystem bridge.
+
+
 ## 0.4.0
 
 Typed events and opt-in performance sampling. A game that calls none of

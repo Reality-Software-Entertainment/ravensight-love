@@ -551,3 +551,34 @@ love example                        # a small game that uses the SDK (inert unle
 ## License
 
 MIT
+
+## Remote configuration and experiments
+
+Held release: deploy the platform config endpoint first. Config is public game
+data, never secrets. The desktop SDK fetches it at session start, using the
+existing ingest key. Register after `init`, before the next `update`:
+
+```lua
+ravensight.on('config_ready', function(source)
+  movement_speed = ravensight.getConfig('movement_speed', 4.0)
+end)
+ravensight.fetchConfig() -- Explicit refresh, concurrent calls share a request.
+```
+
+Readiness reports `network`, `cache` or `default`. Getters never coerce types and
+return copies of table values. Missing values use your fallback. Requests have a
+five-second transport timeout. Invalid or offline responses preserve the last
+valid document. The single persistent cache is scoped to endpoint, key, player,
+platform and build; playtests never persist it. Consent changes and identity
+resets discard late responses. Keep safe defaults in the game.
+
+Active experiments add `rs_exp_<key>` to newly tracked events, including typed
+helpers. Events queued before config arrives retain their original properties.
+Fresh config responses consume one ordinary event; unchanged ETags are free.
+
+For love.js, use JavaScript SDK 0.5.1 or newer and the matching bridge. Expose
+`Module.FS` with `readFile` and `writeFile` on the page. The bridge returns public
+config through `/tmp/ravensight-config.json` inside the game's virtual filesystem;
+`ravensight.update` reads replies bound to its request ID. The first update asks
+for config. The JavaScript SDK owns caching, consent and event exposure labels.
+A missing/older bridge falls back after six seconds, with no remote values.

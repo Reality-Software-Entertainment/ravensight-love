@@ -91,7 +91,7 @@ function defaultWindow() {
   return typeof globalThis.window === 'object' && globalThis.window ? globalThis.window : null;
 }
 
-const KNOWN_OPS = new Set(['track', 'feedback', 'enabled', 'flush', 'health']);
+const KNOWN_OPS = new Set(['track', 'feedback', 'enabled', 'flush', 'health', 'config']);
 
 /**
  * Wraps Module.print so tagged lines from the Lua SDK reach `rs`.
@@ -140,6 +140,7 @@ export function installRavensightBridge(rs, Module, options = {}) {
       // Storage can be blocked; the opt-out still holds for this page load.
     }
   };
+  let configRequest = 0;
   let health = null; // the latest summary from the game, sent once on pagehide
   const warned = new Set();
   const warnOnce = (key, message) => {
@@ -162,6 +163,21 @@ export function installRavensightBridge(rs, Module, options = {}) {
   const handle = (msg) => {
     if (!msg || typeof msg !== 'object' || msg.v !== 1) return false;
     switch (msg.op) {
+      case 'config': {
+        if (typeof msg.id !== 'string' || !/^[a-f0-9]{32}:[1-9][0-9]{0,9}$/.test(msg.id)) return true;
+        const currentId = msg.id;
+        const request = ++configRequest;
+        guard('config', async () => {
+          const result = enabled && typeof rs.fetchConfig === 'function'
+            ? await rs.fetchConfig() : { source: 'default', values: {} };
+          if (!enabled || request !== configRequest) return;
+          if (Module.FS && typeof Module.FS.writeFile === 'function') {
+            const text = JSON.stringify({ id: currentId, source: result.source, values: result.values });
+            if (text.length <= 435000) Module.FS.writeFile('/tmp/ravensight-config.json', text);
+          }
+        });
+        return true;
+      }
       case 'track':
         guard('track', () => rs.track(msg.event, msg.data || {}));
         return true;
@@ -173,6 +189,7 @@ export function installRavensightBridge(rs, Module, options = {}) {
         guard('feedback', () => rs.submitFeedback(msg.message, msg.category, msg.rating));
         return true;
       case 'enabled':
+        configRequest += 1;
         enabled = msg.value === true;
         remember(enabled);
         guard('enabled', () => rs.setEnabled(msg.value === true));

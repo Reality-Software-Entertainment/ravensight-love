@@ -333,7 +333,7 @@ function ravensight.update(dt)
       if summary then core:stashHealth(summary) end
     end
   end
-  if transportName == 'web' then return end
+  if transportName == 'web' then core:update() return end
   pollResponses()
   core:update()
   if holdingQuit and core.quitReady then
@@ -415,6 +415,14 @@ function ravensight.error(severity, message, opts)
 end
 
 --- Send what is queued now instead of waiting for the batching timer.
+function ravensight.fetchConfig()
+  return core and core:fetchConfig() or false
+end
+function ravensight.getConfig(key, fallback)
+  if not core then return fallback end
+  return core:getConfig(key, fallback)
+end
+
 function ravensight.flush()
   if core then core:flush() end
 end

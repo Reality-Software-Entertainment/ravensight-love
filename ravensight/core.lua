@@ -27,10 +27,12 @@
 
 local json = require(((...):gsub('core$', 'json')))
 
+local Config = require(((...):gsub('core$', 'config')))
+
 local Core = {}
 Core.__index = Core
 
-Core.VERSION = '0.4.0'
+Core.VERSION = '0.4.1'
 Core.MAX_BATCH_SIZE = 50
 Core.DEFAULT_RETRY_SECONDS = 10
 Core.MAX_BACKOFF_SECONDS = 300
@@ -93,7 +95,7 @@ function Core.eventBytes(data)
 end
 
 local EVENTS = {
-  session_ready = true, session_failed = true, tracking_disabled = true,
+  config_ready = true, session_ready = true, session_failed = true, tracking_disabled = true,
   events_flushed = true, flush_failed = true, feedback_submitted = true,
   feedback_failed = true, event_tracked = true,
 }
@@ -155,6 +157,10 @@ function Core.new(deps)
   self.sessionExpiresAt = 0
   self.sessionPending = false
   self.sessionGeneration = 0
+  self.configGeneration = 0
+  self.configPending = false
+  self.configDocument = nil
+  self.configScope = nil
   self.trackingEnabled = true
   self.serverTrackingEnabled = true
   self.playerOptedOut = false
@@ -420,6 +426,7 @@ function Core:onSessionResponse(status, body, headers, generation)
       self.log('info', 'session ready')
       self:emit('session_ready')
       self:flushPending()
+      self:fetchConfig()
     else
       self.log('error', 'malformed session response')
       self:emit('session_failed', 'malformed_response')
@@ -474,6 +481,52 @@ end
 
 -- ---------------------------------------------------------------- tracking
 
+-- Config is scoped to the same identity/context that determines assignments.
+function Core:currentConfigScope()
+  return json.encode({ self.apiUrl, self.ingestKey, self.deviceId, self.playtestToken ~= '' and 'ravensight-playtest' or self.platform, self.gameVersion })
+end
+function Core:cachedConfig()
+  if not self.trackingEnabled or self.keyRefused or self.playtestBlocked or not self.serverTrackingEnabled or self.ingestKey == '' or self.deviceId == '' then return nil end
+  local scope = self:currentConfigScope()
+  if self.configScope == scope then return self.configDocument end
+  self.configScope, self.configDocument = scope, nil
+  if self.playtestToken == '' then
+    local ok, text = pcall(self.storage.read, 'ravensight_config.json')
+    local cached = ok and type(text) == 'string' and #text <= 435000 and json.decode(text) or nil
+    if type(cached) == 'table' and cached.scope == scope and Config.valid(cached.document) then self.configDocument = cached.document end
+  end
+  return self.configDocument
+end
+function Core:getConfig(key, fallback)
+  local cached = self:cachedConfig()
+  return Config.get(cached and cached.values, key, fallback)
+end
+function Core:fetchConfig()
+  if not self.trackingEnabled or self.playerOptedOut or self.keyRefused or self.playtestBlocked or not self.serverTrackingEnabled or self.quitting or self.ingestKey == '' or self.deviceId == '' or self.configPending then return false end
+  local cached = self:cachedConfig()
+  local scope = self:currentConfigScope()
+  self.configGeneration = self.configGeneration + 1
+  local generation = self.configGeneration
+  self.configPending = true
+  local headers = { ['X-API-Key'] = self.ingestKey }
+  if cached then headers['If-None-Match'] = cached.etag end
+  local platform = self.playtestToken ~= '' and 'ravensight-playtest' or self.platform
+  self.send({ method = 'GET', url = self.apiUrl .. '/api/v1/ingest/config?deviceId=' .. Config.encode(self.deviceId) .. '&platform=' .. Config.encode(platform) .. '&gameVersion=' .. Config.encode(self.gameVersion), headers = headers, timeout = 5 }, function(status, body)
+    if generation ~= self.configGeneration then return end
+    self.configPending = false
+    if not self.trackingEnabled or self.playerOptedOut or self.keyRefused or not self.serverTrackingEnabled or scope ~= self:currentConfigScope() then return end
+    local source = self:cachedConfig() and 'cache' or 'default'
+    local document = status == 200 and type(body) == 'string' and #body <= 430000 and json.decode(body) or nil
+    if Config.valid(document) then
+      self.configDocument, self.configScope = document, scope
+      source = 'network'
+      if self.playtestToken == '' then pcall(self.storage.write, 'ravensight_config.json', json.encode({ scope = scope, document = document })) end
+    end
+    self:emit('config_ready', source)
+  end)
+  return true
+end
+
 --- Queue an event. Safe before the session is ready.
 function Core:track(name, data)
   if not self.trackingEnabled then return end
@@ -515,6 +568,8 @@ end
 function Core:enqueue(name, data)
   -- Never mutate the caller's table.
   local eventData = shallowCopy(data)
+  local document = self:cachedConfig()
+  for _, row in ipairs(document and document.experiments or {}) do eventData['rs_exp_' .. row.key] = row.variant end
   if self.playtestTags then
     for k, v in pairs(self.playtestTags) do eventData[k] = v end
   end
@@ -743,6 +798,9 @@ function Core:dropSession()
   self.sessionExpiresAt = 0
   self.sessionPending = false
   self.sessionGeneration = self.sessionGeneration + 1
+  self.configGeneration = self.configGeneration + 1
+  self.configPending = false
+  self.configDocument, self.configScope = nil, nil
 end
 
 function Core:clearQueue()

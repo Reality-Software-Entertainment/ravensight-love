@@ -30,6 +30,7 @@
 local prefix = (...):gsub('web$', '')
 local json = require(prefix .. 'json')
 local Core = require(prefix .. 'core')
+local Config = require(prefix .. 'config')
 
 local Web = {}
 Web.__index = Web
@@ -38,7 +39,7 @@ Web.TAG = '__RAVENSIGHT__ '
 Web.PROTOCOL_VERSION = 1
 
 local EVENTS = {
-  session_ready = true, session_failed = true, tracking_disabled = true,
+  config_ready = true, session_ready = true, session_failed = true, tracking_disabled = true,
   events_flushed = true, flush_failed = true, feedback_submitted = true,
   feedback_failed = true, event_tracked = true,
 }
@@ -65,6 +66,17 @@ function Web.new(deps)
   self.trackingEnabled = true
   self.eventCounter = 0
   self.warnedTooLarge = false
+  self.configValues = {}
+  self.configCounter = 0
+  self.configPending = nil
+  self.configStarted = false
+  self.readConfig = deps.readConfig or function()
+    local file = io.open('/tmp/ravensight-config.json', 'r')
+    if not file then return nil end
+    local text = file:read(435001)
+    file:close()
+    return text
+  end
   return self
 end
 
@@ -193,6 +205,9 @@ function Web:setTrackingEnabled(enabled)
   Core.saveChoice(self.storage, self.consent, enabled)
   self:send({ op = 'enabled', value = enabled })
   if not enabled then
+    self.configPending = nil
+    self.configValues = {}
+    self.configStarted = false
     self.log('info', 'tracking disabled by player opt-out')
     self:emit('tracking_disabled', 'player')
   end
@@ -200,6 +215,37 @@ end
 
 function Web:isTrackingEnabled()
   return self.trackingEnabled
+end
+
+-- The page writes a response to its virtual filesystem, never the host disk.
+function Web:fetchConfig()
+  if not self.trackingEnabled or self.configPending then return false end
+  self.configStarted = true
+  self.configCounter = self.configCounter + 1
+  if not self.configNonce then self.configNonce = self.randomHex(16) end
+  self.configPending = self.configNonce .. ':' .. tostring(self.configCounter)
+  self.configDeadline = self.time() + 6
+  self:send({ op = 'config', id = self.configPending })
+  return true
+end
+function Web:getConfig(key, fallback)
+  if not self.trackingEnabled then return fallback end
+  return Config.get(self.configValues, key, fallback)
+end
+function Web:update()
+  if not self.trackingEnabled then return end
+  if not self.configStarted then self:fetchConfig() end
+  if not self.configPending then return end
+  local ok, text = pcall(self.readConfig)
+  local result = ok and type(text) == 'string' and #text <= 435000 and json.decode(text) or nil
+  if type(result) == 'table' and result.id == self.configPending and Config.values(result.values) and (result.source == 'network' or result.source == 'cache' or result.source == 'default') then
+    self.configPending = nil
+    self.configValues = result.values
+    self:emit('config_ready', result.source)
+  elseif self.time() >= self.configDeadline then
+    self.configPending = nil
+    self:emit('config_ready', next(self.configValues) and 'cache' or 'default')
+  end
 end
 
 return Web

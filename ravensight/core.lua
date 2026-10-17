@@ -30,7 +30,7 @@ local json = require(((...):gsub('core$', 'json')))
 local Core = {}
 Core.__index = Core
 
-Core.VERSION = '0.3.0'
+Core.VERSION = '0.4.0'
 Core.MAX_BATCH_SIZE = 50
 Core.DEFAULT_RETRY_SECONDS = 10
 Core.MAX_BACKOFF_SECONDS = 300
@@ -378,6 +378,7 @@ function Core:startSession()
   end
   local body = { deviceId = self.deviceId, gameVersion = self.gameVersion, platform = platform }
   if self.distribution then body.distribution = self.distribution end
+  body.sdk = 'love/' .. Core.VERSION
   self.send({
     method = 'POST',
     url = self.apiUrl .. '/api/v1/session',

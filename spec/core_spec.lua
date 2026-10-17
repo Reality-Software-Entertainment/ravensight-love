@@ -688,7 +688,7 @@ return {
     eq(keys(session), 'body,headers,method,url')
     eq(session.url, 'https://api.test/api/v1/session')
     eq(keys(session.headers), 'Content-Type,X-API-Key')
-    eq(keys(json.decode(session.body)), 'deviceId,distribution,gameVersion,platform')
+    eq(keys(json.decode(session.body)), 'deviceId,distribution,gameVersion,platform,sdk')
 
     local batch = h.answer('/api/v1/track/batch', 202)
     eq(batch.url, 'https://api.test/api/v1/track/batch')

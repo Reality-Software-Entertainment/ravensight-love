@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.4.0
+
+Typed events and opt-in performance sampling. A game that calls none of
+the new functions and does not pass `performance` behaves as on 0.3.0,
+except that the session request now also carries an `sdk` field.
+
+### Added
+
+- **Typed events.** `ravensight.purchase`, `ravensight.resource`,
+  `ravensight.progression` and `ravensight.error` build the reserved
+  `rs_*` properties and call `track`, so nothing about queueing, batching,
+  retries, opt-out or playtest runs changes. Each takes an optional `opts`
+  table with `name` (event name) and `props` (extra properties, merged
+  first so the reserved keys win). The currency is upper-cased, an error
+  message is cut to 200 characters and its stack to 2000 (never inside a
+  UTF-8 character). Bad input is passed through and flagged by the server,
+  never raised.
+- **Health sampling, off by default.** `init({ performance = true })`
+  samples the frame time once a second from `update(dt)`, keeps at most 600
+  samples, and sends one `health` event per session with the median and
+  10th percentile of frames per second, plus the Lua heap in MB and the
+  boot time on the desktop. It is sent from `quit()`, before `game_exited`,
+  and nothing is sent when no second was sampled.
+- **Web health.** In a love.js build the game prints its latest summary as
+  a new `health` line, and `ravensight-love-bridge.js` sends it once on
+  `pagehide`, before the flush.
+- `update(dt)` takes the frame time. The no-argument form still works and
+  reads `love.timer.getDelta()` when `performance` is on.
+- The session request carries `"sdk": "love/<version>"`.
+- `ravensight/typed.lua`, the pure builders and sampler, with its own
+  specs.
+
 ## 0.3.0
 
 For games whose builds or source anyone can download. A game that passes a

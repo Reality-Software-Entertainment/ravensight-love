@@ -358,7 +358,7 @@ return {
           eq(keys(req.headers), 'X-API-Key'); eq(req.body, nil)
         elseif path == '/api/v1/session' then
           eq(keys(req.headers), 'Content-Type,X-API-Key')
-          eq(keys(body), 'deviceId,distribution,gameVersion,platform')
+          eq(keys(body), 'deviceId,distribution,gameVersion,platform,sdk')
         elseif path == '/api/v1/track/batch' then
           eq(keys(req.headers), 'Content-Type,X-Session-Token')
           eq(keys(body), 'events')
@@ -385,6 +385,139 @@ return {
         end
       end
       eq(table.concat(seen, ' | '), 'GET /api/v1/settings | POST /api/v1/session | POST /api/v1/track/batch | POST /api/v1/track/batch | POST /api/v1/feedback')
+    end)
+  end },
+
+  -- ------------------------------------------- 0.4.0: typed events, health
+
+  { 'the typed helpers queue one ordinary track call each, with the reserved keys', function()
+    run(nil, nil, function(w)
+      w.sdk.init({ ingestKey = 'gt_live_k', synchronous = true })
+      local seen = {}
+      w.sdk.on('event_tracked', function(name, data) seen[#seen + 1] = { name, data } end)
+      w.sdk.purchase(499, 'usd', 'bundle', 'starter')
+      w.sdk.resource('sink', 'gold', 20)
+      w.sdk.progression('complete', 'world1', { p2 = 'level3' })
+      w.sdk.error('warning', 'oops', { name = 'soft_error' })
+      local names = {}
+      for i, e in ipairs(seen) do names[i] = e[1] end
+      eq(table.concat(names, ','), 'purchase,resource_sink,progression_complete,soft_error')
+      eq(seen[1][2].rs_currency, 'USD'); eq(seen[1][2].rs_kind, 'purchase')
+      eq(seen[2][2].rs_flow, 'sink'); eq(seen[3][2].rs_p2, 'level3'); eq(seen[4][2].rs_severity, 'warning')
+      assert(seen[1][2].rs_event_id, 'still gets its event id')
+    end)
+  end },
+  { 'typed helpers are silent no-ops before init and while inert', function()
+    run(nil, nil, function(w)
+      w.sdk.purchase(1, 'usd', 'a', 'b')
+      w.sdk.error('error', 'x')
+      w.sdk.init({ optional = true })
+      w.sdk.resource('source', 'gold', 1)
+      w.sdk.progression('start', 'p')
+      eq(#w.lines, 0)
+    end)
+  end },
+  { 'performance off: nothing is sampled and no health event is sent', function()
+    run(nil, nil, function(w)
+      w.sdk.init({ ingestKey = 'gt_live_k', synchronous = true })
+      local names = {}
+      w.sdk.on('event_tracked', function(name) names[#names + 1] = name end)
+      for _ = 1, 200 do w.sdk.update(1 / 10) end
+      w.sdk.quit()
+      for _, n in ipairs(names) do assert(n ~= 'health', 'no health event') end
+    end)
+  end },
+  { 'performance on: one health event on quit, before game_exited, once only', function()
+    run(nil, nil, function(w)
+      package.loaded['ravensight.transport'] = { select = function()
+        return { name = 'fake', request = function(req)
+          if req.url:find('/settings$') then return 200, '{"trackingEnabled":true}', {} end
+          if req.url:find('/session$') then return 201, '{"token":"ses","expiresIn":3600}', {} end
+          return 202, '{}', {}
+        end }
+      end }
+      w.sdk.init({ ingestKey = 'gt_live_k', synchronous = true, performance = true })
+      local seen = {}
+      w.sdk.on('event_tracked', function(name, data) seen[#seen + 1] = { name, data } end)
+      for _ = 1, 120 do w.sdk.update(1 / 20) end -- six seconds at 20 fps
+      for _, e in ipairs(seen) do assert(e[1] ~= 'health', 'not sent from the frame hook') end
+      w.sdk.quit()
+      w.sdk.quit()
+      local names = {}
+      for i, e in ipairs(seen) do names[#names + 1] = e[1] end
+      local joined = table.concat(names, ',')
+      assert(joined:match('health,game_exited$'), joined)
+      local count = 0
+      for _, n in ipairs(names) do if n == 'health' then count = count + 1 end end
+      eq(count, 1, 'exactly one health event')
+      local h
+      for _, e in ipairs(seen) do if e[1] == 'health' then h = e[2] end end
+      eq(h.rs_kind, 'health'); eq(h.rs_fps_median, 20); eq(h.rs_fps_p10, 20)
+      assert(h.rs_boot_ms >= 0, 'boot time on the desktop')
+      assert(h.rs_memory_mb > 0, 'memory on the desktop')
+    end)
+  end },
+  { 'performance on with no second sampled sends no health event', function()
+    run(nil, nil, function(w)
+      w.sdk.init({ ingestKey = 'gt_live_k', synchronous = true, performance = true })
+      local names = {}
+      w.sdk.on('event_tracked', function(name) names[#names + 1] = name end)
+      w.sdk.update(0.1)
+      w.sdk.quit()
+      for _, n in ipairs(names) do assert(n ~= 'health', 'no health event') end
+    end)
+  end },
+  { 'update() without dt still works and samples from love.timer.getDelta', function()
+    run(nil, nil, function(w)
+      package.loaded['ravensight.transport'] = { select = function()
+        return { name = 'fake', request = function(req)
+          if req.url:find('/settings$') then return 200, '{"trackingEnabled":true}', {} end
+          if req.url:find('/session$') then return 201, '{"token":"ses","expiresIn":3600}', {} end
+          return 202, '{}', {}
+        end }
+      end }
+      w.sdk.init({ ingestKey = 'gt_live_k', synchronous = true, performance = true })
+      love.timer.getDelta = function() return 0.5 end
+      local names = {}
+      w.sdk.on('event_tracked', function(name) names[#names + 1] = name end)
+      for _ = 1, 4 do w.sdk.update() end
+      w.sdk.quit()
+      local joined = table.concat(names, ',')
+      assert(joined:match('health,game_exited$'), joined)
+    end)
+    run(nil, nil, function(w)
+      w.sdk.init({ ingestKey = 'gt_live_k', synchronous = true })
+      w.sdk.update()
+    end)
+  end },
+  { 'web: the page gets the latest health summary as a stash line, never a track line', function()
+    run('Web', nil, function(w)
+      w.sdk.init({ ingestKey = 'gt_live_k', performance = true })
+      for _ = 1, 3 do w.sdk.update(1) end
+      local ops = w.after()
+      eq(#ops, 1, 'first stash after the third sampled second')
+      eq(ops[1].op, 'health')
+      eq(ops[1].data.rs_kind, 'health'); eq(ops[1].data.rs_fps_median, 1)
+      assert(ops[1].data.rs_event_id, 'carries an event id')
+      eq(ops[1].data.rs_memory_mb, nil, 'no memory figure on the web')
+      for _ = 1, 10 do w.sdk.update(1) end
+      eq(#w.after(), 2, 'refreshed at ten samples, not every second')
+      eq(w.sdk.quit(), false)
+      eq(#w.after(), 2, 'quit prints nothing more on the web')
+    end)
+  end },
+  { 'web: health is silent while opted out and without performance', function()
+    run('Web', nil, function(w)
+      w.sdk.init({ ingestKey = 'gt_live_k' })
+      for _ = 1, 5 do w.sdk.update(1) end
+      eq(#w.after(), 0)
+    end)
+    run('Web', nil, function(w)
+      w.sdk.init({ ingestKey = 'gt_live_k', performance = true })
+      w.sdk.setTrackingEnabled(false)
+      for _ = 1, 5 do w.sdk.update(1) end
+      local ops = w.after()
+      eq(#ops, 1); eq(ops[1].op, 'enabled')
     end)
   end },
 }

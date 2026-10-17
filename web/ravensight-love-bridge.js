@@ -12,6 +12,9 @@
 //             off, before any session or game_started (ravensightLoveEnabled).
 //             Opting back in calls rs.init() if the page never did.
 //   flush     rs.flush()
+//   health    keeps the latest performance summary (a game started with
+//             performance = true) and, on pagehide, sends it once as the
+//             `health` event, before the flush and the SDK's game_exited
 //
 // Every other line, and any tagged line that is not valid JSON or is longer
 // than 32 KB, goes to the original print untouched. Install it before
@@ -88,7 +91,7 @@ function defaultWindow() {
   return typeof globalThis.window === 'object' && globalThis.window ? globalThis.window : null;
 }
 
-const KNOWN_OPS = new Set(['track', 'feedback', 'enabled', 'flush']);
+const KNOWN_OPS = new Set(['track', 'feedback', 'enabled', 'flush', 'health']);
 
 /**
  * Wraps Module.print so tagged lines from the Lua SDK reach `rs`.
@@ -137,6 +140,7 @@ export function installRavensightBridge(rs, Module, options = {}) {
       // Storage can be blocked; the opt-out still holds for this page load.
     }
   };
+  let health = null; // the latest summary from the game, sent once on pagehide
   const warned = new Set();
   const warnOnce = (key, message) => {
     if (warned.has(key)) return;
@@ -180,6 +184,9 @@ export function installRavensightBridge(rs, Module, options = {}) {
       case 'flush':
         guard('flush', () => rs.flush());
         return true;
+      case 'health':
+        health = msg.data && typeof msg.data === 'object' && !Array.isArray(msg.data) ? msg.data : null;
+        return true;
       default:
         return false;
     }
@@ -206,6 +213,12 @@ export function installRavensightBridge(rs, Module, options = {}) {
     win.addEventListener('pagehide', () => {
       guard('exit', () => {
         if (!enabled) return undefined;
+        if (health) {
+          // Once per session: cleared first, so a restored page cannot resend.
+          const summary = health;
+          health = null;
+          guard('health', () => rs.track('health', summary));
+        }
         const FS = Module.FS;
         if (FS && typeof FS.readFile === 'function') {
           let text = null;

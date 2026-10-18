@@ -19,6 +19,13 @@ local function make(files)
   return h
 end
 return {
+  {'reserved config keys remain forbidden while experiment words are values', function()
+    for _, word in ipairs({'constructor','prototype'}) do
+      local candidate = doc(); candidate.values = {[word]=1}; eq(Config.valid(candidate),false)
+      candidate.values = {nested={[word]=1}}; eq(Config.valid(candidate),false)
+      candidate.values = {}; candidate.experiments = {{key=word,variant=word}}; eq(Config.valid(candidate),true)
+    end
+  end},
   {'config fetch, ETag, strict getters and labels', function()
     local h = make(); assert(h.core:fetchConfig()); eq(h.core:fetchConfig(), false)
     local req = h.answer(200, doc()); eq(req.method,'GET'); eq(req.headers['X-API-Key'],'public')

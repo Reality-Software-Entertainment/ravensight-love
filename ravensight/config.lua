@@ -21,7 +21,7 @@ function Config.values(values)
   local count = 0
   for k, v in pairs(values) do
     count = count + 1
-    if count > 50 or not identifier(k, 64) or not safe(v, 0) then return false end
+    if count > 50 or not identifier(k, 64) or k == 'constructor' or k == 'prototype' or not safe(v, 0) then return false end
     local ok, text = pcall(json.encode, v)
     if not ok or #text > 8192 then return false end
   end

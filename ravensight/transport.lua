@@ -59,6 +59,30 @@ end
 
 -- --------------------------------------------------------- 2. WinHTTP
 
+-- Keep transfer failure distinct from HTTP success, even after receiving bytes.
+local function readWinHttpBody(lib, ffi, handle, limit)
+  local chunks, received = {}, 0
+  local available, read = ffi.new('DWORD[1]'), ffi.new('DWORD[1]')
+  while true do
+    if lib.WinHttpQueryDataAvailable(handle, available) == 0 then
+      return nil, 'network_error'
+    end
+    local count = tonumber(available[0])
+    if count == 0 then return table.concat(chunks) end
+    if limit and received + count > limit then return nil, 'response_too_large' end
+    local buf = ffi.new('char[?]', count)
+    if lib.WinHttpReadData(handle, buf, count, read) == 0 then
+      return nil, 'network_error'
+    end
+    local size = tonumber(read[0])
+    -- No progress after a positive availability result cannot be accepted as EOF.
+    if size <= 0 or size > count then return nil, 'network_error' end
+    received = received + size
+    chunks[#chunks + 1] = ffi.string(buf, size)
+  end
+end
+transport._readWinHttpBody = readWinHttpBody
+
 local function winhttp(ffi)
   if ffi.os ~= 'Windows' then return nil end
   local ok = pcall(ffi.cdef, [[
@@ -180,17 +204,13 @@ local function winhttp(ffi)
         end
       end
 
-      local chunks, received = {}, 0
-      local available = ffi.new('DWORD[1]')
-      local read = ffi.new('DWORD[1]')
-      while lib.WinHttpQueryDataAvailable(handle, available) ~= 0 and available[0] > 0 do
-        if req.maxResponseBytes and received + tonumber(available[0]) > req.maxResponseBytes then lib.WinHttpCloseHandle(handle);lib.WinHttpCloseHandle(connect);return 0, 'response_too_large', {} end
-        local buf = ffi.new('char[?]', available[0])
-        if lib.WinHttpReadData(handle, buf, available[0], read) == 0 then break end
-        received = received + tonumber(read[0])
-        chunks[#chunks + 1] = ffi.string(buf, read[0])
+      local responseBody, readError = readWinHttpBody(lib, ffi, handle, req.maxResponseBytes)
+      if responseBody then
+        result = { tonumber(status[0]), responseBody, headers }
+      else
+        -- Never expose an original 2xx status or partial body after a failed read.
+        result = { 0, readError, {} }
       end
-      result = { tonumber(status[0]), table.concat(chunks), headers }
     end
     lib.WinHttpCloseHandle(handle)
     lib.WinHttpCloseHandle(connect)

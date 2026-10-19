@@ -1,0 +1,73 @@
+name: Windows native transport
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ravensight/transport.lua
+      - spec/**
+      - .github/workflows/windows-transport.yml
+  pull_request:
+    paths:
+      - ravensight/transport.lua
+      - spec/**
+      - .github/workflows/windows-transport.yml
+permissions:
+  contents: read
+jobs:
+  winhttp:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        architecture: [x64, x86]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: LuaJIT/LuaJIT
+          ref: dd3b24369ddfaa83c78cd6fdd91d157c8968ec8d
+          path: .runtime/LuaJIT
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build pinned official LuaJIT using installed MSVC
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vs) { throw 'MSVC installation unavailable' }
+          $vcvars = Join-Path $vs 'VC\Auxiliary\Build\vcvarsall.bat'
+          $source = Join-Path $env:GITHUB_WORKSPACE '.runtime\LuaJIT\src'
+          $batch = Join-Path $env:RUNNER_TEMP 'build-luajit.cmd'
+          @"
+          @echo off
+          call "$vcvars" ${{ matrix.architecture }}
+          if errorlevel 1 exit /b 1
+          cd /d "$source"
+          call msvcbuild.bat
+          exit /b %errorlevel%
+          "@ | Set-Content $batch
+          & cmd.exe /c $batch
+          if ($LASTEXITCODE -ne 0) { throw 'LuaJIT source build failed' }
+          & "$source\luajit.exe" -e "assert(jit.os == 'Windows'); assert(jit.arch == '${{ matrix.architecture }}'); print(jit.version, jit.arch)"
+          if ($LASTEXITCODE -ne 0) { throw 'LuaJIT runtime unavailable' }
+      - name: Run unit regressions
+        shell: pwsh
+        run: |
+          & .\.runtime\LuaJIT\src\luajit.exe spec/run.lua
+          if ($LASTEXITCODE -ne 0) { throw 'SDK unit regression failed' }
+      - name: Exercise actual WinHTTP against loopback only
+        shell: pwsh
+        run: |
+          $lua = Join-Path $env:GITHUB_WORKSPACE '.runtime\LuaJIT\src\luajit.exe'
+          python spec/runtime/run.py --transport winhttp --lua $lua 2>&1 | Tee-Object winhttp-runtime.log
+          if ($LASTEXITCODE -ne 0) { throw 'Native WinHTTP acceptance failed' }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: winhttp-${{ matrix.architecture }}
+          path: winhttp-runtime.log
+          if-no-files-found: ignore

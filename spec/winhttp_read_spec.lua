@@ -1,3 +1,4 @@
+local setTimeouts = require('ravensight.transport')._setWinHttpTimeouts
 local expectedLength = require('ravensight.transport')._winHttpExpectedLength
 local readBody = require('ravensight.transport')._readWinHttpBody
 
@@ -34,6 +35,28 @@ local function fails(script, expected)
 end
 
 return {
+  {'WinHTTP timeouts configure data and response headers', function()
+    local calls = 0
+    local ffi = {new=function(_, value) return {[0]=value} end}
+    local lib = {
+      WinHttpSetTimeouts=function(_, resolve, connect, send, receive)
+        assert(resolve==150 and connect==150 and send==150 and receive==150)
+        calls=calls+1; return 1
+      end,
+      WinHttpSetOption=function(_, option, value, bytes)
+        assert(option==7 and value[0]==150 and bytes==4)
+        calls=calls+1; return 1
+      end,
+    }
+    assert(setTimeouts(lib, ffi, {}, 150) and calls==2)
+  end},
+  {'WinHTTP failed data timeout configuration refuses request', function()
+    assert(not setTimeouts({WinHttpSetTimeouts=function() return 0 end}, {}, {}, 150))
+  end},
+  {'WinHTTP failed header timeout configuration refuses request', function()
+    assert(not setTimeouts({WinHttpSetTimeouts=function() return 1 end,
+      WinHttpSetOption=function() return 0 end}, {new=function() return {} end}, {}, 150))
+  end},
   {'WinHTTP malformed and overflow lengths fail closed', function()
     for _, value in ipairs({'-1', '1.5', 'NaN', '1, 1', '', '9007199254740992', string.rep('9', 400)}) do
       local length, err = expectedLength({['content-length']=value}, 'GET', 200, 65536)

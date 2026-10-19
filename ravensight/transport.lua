@@ -59,6 +59,14 @@ end
 
 -- --------------------------------------------------------- 2. WinHTTP
 
+local function setWinHttpTimeouts(lib, ffi, handle, ms)
+  if lib.WinHttpSetTimeouts(handle, ms, ms, ms, ms) == 0 then return false end
+  -- Response headers have a separate default (90 seconds), option 7 in winhttp.h.
+  local responseTimeout = ffi.new('DWORD[1]', ms)
+  return lib.WinHttpSetOption(handle, 7, responseTimeout, 4) ~= 0
+end
+transport._setWinHttpTimeouts = setWinHttpTimeouts
+
 local function winHttpExpectedLength(headers, method, status, limit)
   if method == 'HEAD' or status < 200 or status == 204 or status == 304
     or headers['transfer-encoding'] then return nil end
@@ -190,7 +198,11 @@ local function winhttp(ffi)
     if handle == nil then lib.WinHttpCloseHandle(connect) return 0, 'open_failed', {} end
 
     local ms = math.floor((req.timeout or DEFAULT_TIMEOUT) * 1000)
-    lib.WinHttpSetTimeouts(handle, ms, ms, ms, ms)
+    if not setWinHttpTimeouts(lib, ffi, handle, ms) then
+      lib.WinHttpCloseHandle(handle)
+      lib.WinHttpCloseHandle(connect)
+      return 0, 'timeout_configuration_failed', {}
+    end
     if req.maxResponseBytes then
       local never = ffi.new('DWORD[1]', 0)
       if lib.WinHttpSetOption(handle, 88, never, 4) == 0 then lib.WinHttpCloseHandle(handle);lib.WinHttpCloseHandle(connect);return 0, 'redirect_policy_failed', {} end

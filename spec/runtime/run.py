@@ -47,7 +47,8 @@ class Fixture(http.server.BaseHTTPRequestHandler):
         elif self.path == '/truncated':
             self.respond(200, b'partial', length=100)
         elif self.path == '/slow':
-            time.sleep(1)
+            self.server.slow_started = time.monotonic()
+            time.sleep(5)
             self.respond(200, b'late')
         else:
             self.respond(404)
@@ -61,6 +62,7 @@ def main():
     root = pathlib.Path(__file__).resolve().parents[2]
     with http.server.ThreadingHTTPServer(('127.0.0.1', 0), Fixture) as server:
         server.paths = []
+        server.slow_started = None
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
@@ -72,6 +74,9 @@ def main():
             if result.returncode:
                 raise SystemExit(result.returncode)
             assert len(server.paths) == 6, 'unexpected retries or missing requests'
+            elapsed = time.monotonic() - server.slow_started
+            print('Receive timeout observed after %.3f seconds' % elapsed)
+            assert elapsed < 4, 'receive failure exceeded outer per-request acceptance bound'
         finally:
             server.shutdown()
             thread.join(timeout=2)

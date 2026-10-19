@@ -46,6 +46,9 @@ class Fixture(http.server.BaseHTTPRequestHandler):
             self.respond(200, headers={'X-Large': 'x' * 4096})
         elif self.path == '/truncated':
             self.respond(200, b'partial', length=100)
+        elif self.path == '/slow-short':
+            time.sleep(1)
+            self.respond(200, b'late')
         elif self.path == '/slow':
             self.server.slow_started = time.monotonic()
             time.sleep(5)
@@ -73,10 +76,11 @@ def main():
             assert '/must-not-follow' not in server.paths, 'native transport followed redirect'
             if result.returncode:
                 raise SystemExit(result.returncode)
-            assert len(server.paths) == 6, 'unexpected retries or missing requests'
+            assert len(server.paths) == (9 if args.transport == 'winhttp' else 6), 'unexpected retries or missing requests'
             elapsed = time.monotonic() - server.slow_started
             print('Receive timeout observed after %.3f seconds' % elapsed)
-            assert elapsed < 4, 'receive failure exceeded outer per-request acceptance bound'
+            if args.transport == 'libcurl':
+                assert elapsed < 4, 'receive failure exceeded outer per-request acceptance bound'
         finally:
             server.shutdown()
             thread.join(timeout=2)

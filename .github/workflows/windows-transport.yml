@@ -4,12 +4,12 @@ on:
   push:
     branches: [main]
     paths:
-      - ravensight/transport.lua
+      - ravensight/**
       - spec/**
       - .github/workflows/windows-transport.yml
   pull_request:
     paths:
-      - ravensight/transport.lua
+      - ravensight/**
       - spec/**
       - .github/workflows/windows-transport.yml
 permissions:

@@ -27,7 +27,8 @@ MSVC compiler on Windows 2022, for both x64 and x86. No binary mirror is used.
 The runtime candidate `0229455f40a3ba3cc90196360524518f660577d2` passed the
 [Windows matrix](https://github.com/Reality-Software-Entertainment/ravensight-love/actions/runs/39297132584):
 143 unit checks and nine actual WinHTTP loopback checks on each architecture.
-Version and release tag remain unchanged pending patch-release coordination.
+The 0.5.1 patch release requires this same matrix to pass at its exact candidate
+commit before the annotated tag is published.
 
 ## Assertions
 

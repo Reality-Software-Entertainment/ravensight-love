@@ -1,6 +1,18 @@
 # Changelog
 
-## 0.5.0 - Prepared for release
+## 0.5.1 - 2026-10-19
+
+- Reject partial WinHTTP responses on native read failure or early EOF against
+  Content-Length; preserve bodyless and transfer-coded response semantics.
+- Reject malformed/overflow lengths and enforce response size caps.
+- Configure and check both response-header and data-phase timeouts. Native
+  timeout behavior is best effort, not a strict overall deadline; measured
+  Windows2022 subsecond settings did not produce subsecond cancellation.
+- Add actual x64/x86 Windows native loopback acceptance built from pinned official
+  LuaJIT source, covering binary requests, redirects, response limits, truncation
+  and measured timeout behavior. TLS/production capture remains separate.
+
+## 0.5.0 - 2026-10-19
 
 - Add explicit, consented Player Reports from caller-provided PNG bytes, with stable report/session binding and explicit retries. No automatic capture or extra analytics events.
 - Separate signed upload credentials from API credentials; bound response sizes and reject redirects.

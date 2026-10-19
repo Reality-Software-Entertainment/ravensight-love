@@ -59,6 +59,19 @@ end
 
 -- --------------------------------------------------------- 2. WinHTTP
 
+local function winHttpExpectedLength(headers, method, status, limit)
+  if method == 'HEAD' or status < 200 or status == 204 or status == 304
+    or headers['transfer-encoding'] then return nil end
+  local declared = headers['content-length']
+  if not declared then return nil end
+  if not declared:match('^%d+$') then return nil, 'network_error' end
+  local length = tonumber(declared)
+  if not length or length > 9007199254740991 then return nil, 'network_error' end
+  if limit and length > limit then return nil, 'response_too_large' end
+  return length
+end
+transport._winHttpExpectedLength = winHttpExpectedLength
+
 -- Keep transfer failure distinct from HTTP success, even after receiving bytes.
 local function readWinHttpBody(lib, ffi, handle, limit, expectedLength)
   local chunks, received = {}, 0
@@ -209,13 +222,12 @@ local function winhttp(ffi)
 
       -- WinHTTP can report normal EOF on an early close. Check the declared
       -- length as well as DLL errors; bodyless/transfer-coded responses differ.
-      local expectedLength
-      local responseStatus = tonumber(status[0])
-      local declared = headers['content-length']
-      if req.method ~= 'HEAD' and responseStatus >= 200 and responseStatus ~= 204
-        and responseStatus ~= 304 and not headers['transfer-encoding']
-        and declared and declared:match('^%d+$') then
-        expectedLength = tonumber(declared)
+      local expectedLength, lengthError = winHttpExpectedLength(
+        headers, req.method, tonumber(status[0]), req.maxResponseBytes)
+      if lengthError then
+        lib.WinHttpCloseHandle(handle)
+        lib.WinHttpCloseHandle(connect)
+        return 0, lengthError, {}
       end
       local responseBody, readError = readWinHttpBody(lib, ffi, handle, req.maxResponseBytes, expectedLength)
       if responseBody then

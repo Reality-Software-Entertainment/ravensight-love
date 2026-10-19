@@ -1,3 +1,4 @@
+local expectedLength = require('ravensight.transport')._winHttpExpectedLength
 local readBody = require('ravensight.transport')._readWinHttpBody
 
 -- Only the DLL/FFI boundary is replaced: these exercise the production reader.
@@ -33,6 +34,30 @@ local function fails(script, expected)
 end
 
 return {
+  {'WinHTTP malformed and overflow lengths fail closed', function()
+    for _, value in ipairs({'-1', '1.5', 'NaN', '1, 1', '', '9007199254740992', string.rep('9', 400)}) do
+      local length, err = expectedLength({['content-length']=value}, 'GET', 200, 65536)
+      assert(length == nil and err == 'network_error', value)
+    end
+  end},
+  {'WinHTTP declared body beyond cap fails before read', function()
+    local length, err = expectedLength({['content-length']='65537'}, 'GET', 200, 65536)
+    assert(length == nil and err == 'response_too_large')
+  end},
+  {'WinHTTP valid length is a byte count', function()
+    local length, err = expectedLength({['content-length']='0003'}, 'GET', 200, 65536)
+    assert(length == 3 and err == nil)
+  end},
+  {'WinHTTP bodyless and transfer-coded responses ignore representation length', function()
+    for _, status in ipairs({100, 204, 304}) do
+      local length, err = expectedLength({['content-length']='100'}, 'GET', status, 10)
+      assert(length == nil and err == nil)
+    end
+    local length, err = expectedLength({['content-length']='100'}, 'HEAD', 200, 10)
+    assert(length == nil and err == nil)
+    length, err = expectedLength({['content-length']='100', ['transfer-encoding']='chunked'}, 'GET', 200, 10)
+    assert(length == nil and err == nil)
+  end},
   {'WinHTTP normal EOF before declared length discards partial response', function()
     local body, err = read({{bytes='partial'}, {available=0}}, nil, 100)
     assert(body == nil and err == 'network_error')

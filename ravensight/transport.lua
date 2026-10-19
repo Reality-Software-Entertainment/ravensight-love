@@ -80,6 +80,7 @@ local function winhttp(ffi)
     HINTERNET WinHttpConnect(HINTERNET, const wchar_t*, INTERNET_PORT, DWORD);
     HINTERNET WinHttpOpenRequest(HINTERNET, const wchar_t*, const wchar_t*, const wchar_t*, const wchar_t*, const wchar_t**, DWORD);
     BOOL WinHttpSetTimeouts(HINTERNET, int, int, int, int);
+    BOOL WinHttpSetOption(HINTERNET, DWORD, void*, DWORD);
     BOOL WinHttpSendRequest(HINTERNET, const wchar_t*, DWORD, const void*, DWORD, DWORD, uintptr_t);
     BOOL WinHttpReceiveResponse(HINTERNET, void*);
     BOOL WinHttpQueryHeaders(HINTERNET, DWORD, const wchar_t*, void*, DWORD*, DWORD*);
@@ -150,6 +151,10 @@ local function winhttp(ffi)
 
     local ms = math.floor((req.timeout or DEFAULT_TIMEOUT) * 1000)
     lib.WinHttpSetTimeouts(handle, ms, ms, ms, ms)
+    if req.maxResponseBytes then
+      local never = ffi.new('DWORD[1]', 0)
+      if lib.WinHttpSetOption(handle, 88, never, 4) == 0 then lib.WinHttpCloseHandle(handle);lib.WinHttpCloseHandle(connect);return 0, 'redirect_policy_failed', {} end
+    end
 
     local lines = {}
     for k, v in pairs(req.headers or {}) do lines[#lines + 1] = k .. ': ' .. v end
@@ -166,6 +171,7 @@ local function winhttp(ffi)
       local rawLen = ffi.new('DWORD[1]', 0)
       lib.WinHttpQueryHeaders(handle, WINHTTP_QUERY_RAW_HEADERS_CRLF, nil, nil, rawLen, nil)
       local headers = {}
+      if req.maxResponseBytes and tonumber(rawLen[0]) > req.maxResponseBytes then lib.WinHttpCloseHandle(handle);lib.WinHttpCloseHandle(connect);return 0, 'response_too_large', {} end
       if rawLen[0] > 0 then
         local chars = math.floor(tonumber(rawLen[0]) / 2)
         local raw = ffi.new('wchar_t[?]', chars + 1)
@@ -174,12 +180,14 @@ local function winhttp(ffi)
         end
       end
 
-      local chunks = {}
+      local chunks, received = {}, 0
       local available = ffi.new('DWORD[1]')
       local read = ffi.new('DWORD[1]')
       while lib.WinHttpQueryDataAvailable(handle, available) ~= 0 and available[0] > 0 do
+        if req.maxResponseBytes and received + tonumber(available[0]) > req.maxResponseBytes then lib.WinHttpCloseHandle(handle);lib.WinHttpCloseHandle(connect);return 0, 'response_too_large', {} end
         local buf = ffi.new('char[?]', available[0])
         if lib.WinHttpReadData(handle, buf, available[0], read) == 0 then break end
+        received = received + tonumber(read[0])
         chunks[#chunks + 1] = ffi.string(buf, read[0])
       end
       result = { tonumber(status[0]), table.concat(chunks), headers }
@@ -246,11 +254,16 @@ local function libcurl(ffi)
   -- One body and one header buffer, filled by two callbacks created once:
   -- an FFI callback is a scarce resource, so it is never made per request.
   local bodyChunks, headerChunks = {}, {}
+  local responseLimit, bodyBytes, headerBytes
   local writeBody = ffi.cast('rs_curl_write_cb', function(ptr, size, n)
+    if responseLimit and bodyBytes + tonumber(size*n) > responseLimit then return 0 end
+    bodyBytes = bodyBytes + tonumber(size*n)
     bodyChunks[#bodyChunks + 1] = ffi.string(ptr, size * n)
     return size * n
   end)
   local writeHeader = ffi.cast('rs_curl_write_cb', function(ptr, size, n)
+    if responseLimit and headerBytes + tonumber(size*n) > responseLimit then return 0 end
+    headerBytes = headerBytes + tonumber(size*n)
     headerChunks[#headerChunks + 1] = ffi.string(ptr, size * n)
     return size * n
   end)
@@ -263,6 +276,7 @@ local function libcurl(ffi)
     local handle = lib.curl_easy_init()
     if handle == nil then return 0, 'curl_init_failed', {} end
     bodyChunks, headerChunks = {}, {}
+    responseLimit, bodyBytes, headerBytes = req.maxResponseBytes, 0, 0
     local list = nil
     for k, v in pairs(req.headers or {}) do list = lib.curl_slist_append(list, k .. ': ' .. v) end
     -- curl adds "Expect: 100-continue" to larger POSTs; the API never needs it.
@@ -388,7 +402,7 @@ end
 
 --- Returns the first transport that works here, or nil. `prefer` names one
 --- ("https", "winhttp", "libcurl" or "curl") to try first.
-function transport.select(prefer)
+function transport.select(prefer, bounded)
   local okFfi, ffi = pcall(require, 'ffi')
   if not okFfi then ffi = nil end
   local candidates = {
@@ -397,8 +411,8 @@ function transport.select(prefer)
     libcurl = function() return ffi and libcurl(ffi) end,
     curl = function() return curlCommand(ffi) end,
   }
-  local order = { 'https', 'winhttp', 'libcurl', 'curl' }
-  if prefer and candidates[prefer] then table.insert(order, 1, prefer) end
+  local order = bounded and { 'winhttp', 'libcurl' } or { 'https', 'winhttp', 'libcurl', 'curl' }
+  if prefer and candidates[prefer] and (not bounded or prefer=='winhttp' or prefer=='libcurl') then table.insert(order, 1, prefer) end
   for _, name in ipairs(order) do
     local ok, chosen = pcall(candidates[name])
     if ok and chosen then return chosen end

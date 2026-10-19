@@ -140,6 +140,7 @@ local function deliver(id, status, body, headers)
   if callback then callback(status, body, headers) end
 end
 
+local boundedTransport
 local function send(req, callback)
   nextRequestId = nextRequestId + 1
   local id = nextRequestId
@@ -151,7 +152,13 @@ local function send(req, callback)
   elseif syncTransport then
     -- No threads in this game: the request blocks this frame. Answers are
     -- still delivered from update(), never from inside the caller.
-    local status, body, headers = syncTransport.request(req)
+    local selected = syncTransport
+    if req.maxResponseBytes then
+      boundedTransport = boundedTransport or require(modulePrefix .. 'transport').select(nil, true)
+      selected = boundedTransport
+    end
+    local status, body, headers = 0, 'no_bounded_transport', {}
+    if selected then status, body, headers = selected.request(req) end
     table.insert(localResults, { id, status, body, headers })
   else
     table.insert(localResults, { id, 0, 'no_transport', {} })
@@ -425,6 +432,24 @@ end
 
 function ravensight.flush()
   if core then core:flush() end
+end
+
+-- Reports are native-only: a web game must use ravensight-js on its page.
+local reportClient, reportCore
+function ravensight.createReport(input)
+  if not core then return nil, 'not_started' end
+  if transportName == 'web' then return nil, 'use_javascript_reports' end
+  if reportCore ~= core then
+    reportCore = core
+    reportClient = require(modulePrefix .. 'reports').new(core, function(png)
+      return love.data.encode('string', 'hex', love.data.hash('sha256', png))
+    end)
+  end
+  return reportClient.prepare(input)
+end
+function ravensight.submitReport(report, callback)
+  if not core or reportCore ~= core or not reportClient then return false, 'not_started' end
+  return reportClient.submit(report, callback)
 end
 
 --- Send player feedback. category (bug, suggestion, complaint, praise,

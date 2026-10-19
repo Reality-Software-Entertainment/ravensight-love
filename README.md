@@ -582,3 +582,51 @@ config through `/tmp/ravensight-config.json` inside the game's virtual filesyste
 `ravensight.update` reads replies bound to its request ID. The first update asks
 for config. The JavaScript SDK owns caching, consent and event exposure labels.
 A missing/older bridge falls back after six seconds, with no remote values.
+
+### Player Reports with an explicit screenshot
+
+Native LÖVE can now submit an opt-in Player Report using **caller-provided PNG
+bytes**. Nothing captures the screen automatically. Show your own preview and
+consent UI first. PNG must have a valid PNG/IHDR header, dimensions at most
+1600 × 1600, and be at most 1,000,000 bytes; the server fully validates the image.
+Trim private overlays before encoding. Images and prepared reports stay in memory.
+
+```lua
+-- pngBytes comes from your own explicit game capture/encoding flow.
+local report, reason = ravensight.createReport({
+  clientId = 'stable-report-001', -- unique for this report; reuse on retries
+  message = 'The door did not open.', category = 'bug',
+  png = pngBytes, consent = true,
+})
+if report then
+  ravensight.submitReport(report, function(result, errorCode)
+    -- complete: available in Player Reports; processing: accepted, still processing.
+    -- Call submitReport again with THIS report to poll or retry explicitly.
+  end)
+end
+```
+
+A current opted-in tracking session is required. Prepared reports are bound to
+that original session and player identity; a session change refuses retry instead
+of creating another report. No automatic retry, session recreation, disk queue or
+analytics event is generated. Existing server Player Report pricing applies.
+Optional fields are `capturedAt` (Unix seconds within the last day), `source`
+(`player` or `tester`), `level`, `expected`, `steps`, and `frequency`.
+
+Pending server submissions expire after 15 minutes. The server grants at most
+two upload authorizations per submission, so repeated ambiguous upload retries
+can exhaust that allowance. Keep the same prepared report and client ID; do not
+create another report to bypass a failed or uncertain submission. `canceled` is
+terminal. Releasing the local report only frees local memory; it does not send
+a server cancellation or request a refund. Text limits are checked in UTF-8
+bytes, which is conservative for non-ASCII text.
+
+Reports use bounded native libcurl or WinHTTP transfers in the existing worker;
+API tokens are never attached to the separate signed S3 upload. Redirects are
+refused, each response is capped at 64 KiB, and signed form fields precede the
+binary file. Platforms lacking those transports fail closed. The legacy HTTPS
+module and shell-curl fallback remain available for analytics but are not used for
+screenshots. In love.js use the JavaScript SDK's report API on the hosting page;
+PNG data is never printed through the console bridge. Native display capture,
+Windows WinHTTP and production uploads have not been validated by the offline
+protocol tests.

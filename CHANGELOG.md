@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.0 - Prepared for release
+
+- Add explicit, consented Player Reports from caller-provided PNG bytes, with stable report/session binding and explicit retries. No automatic capture or extra analytics events.
+- Separate signed upload credentials from API credentials; bound response sizes and reject redirects.
+- Preserve existing Player Report pricing and document pending, complete and canceled outcomes.
+- Offline protocol coverage passes; live uploads and native game capture remain unverified.
+
 ## 0.4.1 (held)
 
 - Add desktop session-start config, bounded scoped cache, ETags, strict fallback getters and config_ready callbacks.

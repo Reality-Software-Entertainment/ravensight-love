@@ -32,7 +32,7 @@ local Config = require(((...):gsub('core$', 'config')))
 local Core = {}
 Core.__index = Core
 
-Core.VERSION = '0.4.1'
+Core.VERSION = '0.5.0'
 Core.MAX_BATCH_SIZE = 50
 Core.DEFAULT_RETRY_SECONDS = 10
 Core.MAX_BACKOFF_SECONDS = 300

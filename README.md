@@ -627,12 +627,12 @@ refused, each response is capped at 64 KiB, and signed form fields precede the
 binary file. Platforms lacking those transports fail closed. The legacy HTTPS
 module and shell-curl fallback remain available for analytics but are not used for
 screenshots. In love.js use the JavaScript SDK's report API on the hosting page;
-PNG data is never printed through the console bridge. Native display capture,
-Actual Windows2022 WinHTTP x64/x86 loopback acceptance now covers binary
+PNG data is never printed through the console bridge.
+Actual Windows Server 2022 WinHTTP x64/x86 loopback acceptance now covers binary
 requests, redirects, limits and truncation; production uploads and native game
 capture remain unverified. Native timeouts are best-effort phase settings,
-not a strict overall wall-clock deadline. In the measured Windows2022 fixture,
-150/500/1500ms settings failed a stalled response after roughly four seconds,
-while a one-second response succeeded with a 150ms setting. This is observed
+not a strict overall wall-clock deadline. In the measured Windows Server 2022 fixture,
+150/500/1,500 ms settings failed a stalled response after roughly four seconds,
+while a one-second response succeeded with a 150 ms setting. This is observed
 behavior, not a universal four-second floor or maximum. See
-[the native acceptance record](docs/WINDOWS_TRANSPORT_ACCEPTANCE.md).
+[the native acceptance record](https://github.com/Reality-Software-Entertainment/ravensight-love/blob/main/docs/WINDOWS_TRANSPORT_ACCEPTANCE.md).

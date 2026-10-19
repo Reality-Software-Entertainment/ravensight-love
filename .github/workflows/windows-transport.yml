@@ -4,11 +4,13 @@ on:
   push:
     branches: [main]
     paths:
+      - README.md
       - ravensight/**
       - spec/**
       - .github/workflows/windows-transport.yml
   pull_request:
     paths:
+      - README.md
       - ravensight/**
       - spec/**
       - .github/workflows/windows-transport.yml

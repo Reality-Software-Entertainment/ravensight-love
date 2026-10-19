@@ -24,7 +24,10 @@ transport fallback fails the test rather than producing a misleading pass.
 No Editor license, cloud compute or account is needed. The dedicated `Windows native transport` workflow builds the official LuaJIT
 source at commit `dd3b24369ddfaa83c78cd6fdd91d157c8968ec8d` with the installed
 MSVC compiler on Windows 2022, for both x64 and x86. No binary mirror is used.
-The workflow has not yet been pushed or dispatched.
+The workflow and fix were published at `9bb4b73`; the automatic Windows matrix
+built both architectures. Its first run exposed a pre-existing shell-curl test
+assumption, now corrected to assert the intentional Windows native selection.
+Final native runtime acceptance is still pending.
 
 ## Assertions
 

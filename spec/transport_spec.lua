@@ -31,7 +31,13 @@ return {
     assert(chosen.name == 'libcurl' or chosen.name == 'curl' or chosen.name == 'https' or chosen.name == 'winhttp')
   end },
   { 'a preferred transport is tried first', function()
-    local chosen = transport.select('curl')
-    eq(chosen and chosen.name, 'curl')
+    local ok, ffi = pcall(require, 'ffi')
+    local preferred = ok and ffi.os == 'Windows' and 'winhttp' or 'curl'
+    local chosen = transport.select(preferred)
+    eq(chosen and chosen.name, preferred)
+    if preferred == 'winhttp' then
+      -- Shell curl is intentionally disabled on Windows; preference cannot enable it.
+      eq(transport.select('curl').name, 'winhttp')
+    end
   end },
 }

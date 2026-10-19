@@ -60,7 +60,7 @@ end
 -- --------------------------------------------------------- 2. WinHTTP
 
 -- Keep transfer failure distinct from HTTP success, even after receiving bytes.
-local function readWinHttpBody(lib, ffi, handle, limit)
+local function readWinHttpBody(lib, ffi, handle, limit, expectedLength)
   local chunks, received = {}, 0
   local available, read = ffi.new('DWORD[1]'), ffi.new('DWORD[1]')
   while true do
@@ -68,7 +68,10 @@ local function readWinHttpBody(lib, ffi, handle, limit)
       return nil, 'network_error'
     end
     local count = tonumber(available[0])
-    if count == 0 then return table.concat(chunks) end
+    if count == 0 then
+      if expectedLength and received ~= expectedLength then return nil, 'network_error' end
+      return table.concat(chunks)
+    end
     if limit and received + count > limit then return nil, 'response_too_large' end
     local buf = ffi.new('char[?]', count)
     if lib.WinHttpReadData(handle, buf, count, read) == 0 then
@@ -204,7 +207,17 @@ local function winhttp(ffi)
         end
       end
 
-      local responseBody, readError = readWinHttpBody(lib, ffi, handle, req.maxResponseBytes)
+      -- WinHTTP can report normal EOF on an early close. Check the declared
+      -- length as well as DLL errors; bodyless/transfer-coded responses differ.
+      local expectedLength
+      local responseStatus = tonumber(status[0])
+      local declared = headers['content-length']
+      if req.method ~= 'HEAD' and responseStatus >= 200 and responseStatus ~= 204
+        and responseStatus ~= 304 and not headers['transfer-encoding']
+        and declared and declared:match('^%d+$') then
+        expectedLength = tonumber(declared)
+      end
+      local responseBody, readError = readWinHttpBody(lib, ffi, handle, req.maxResponseBytes, expectedLength)
       if responseBody then
         result = { tonumber(status[0]), responseBody, headers }
       else

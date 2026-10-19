@@ -1,7 +1,7 @@
 local readBody = require('ravensight.transport')._readWinHttpBody
 
 -- Only the DLL/FFI boundary is replaced: these exercise the production reader.
-local function read(script, limit)
+local function read(script, limit, expectedLength)
   local step, index = nil, 0
   local ffi = {
     new = function() return {[0] = 0} end,
@@ -22,7 +22,7 @@ local function read(script, limit)
       return 1
     end,
   }
-  local body, err = readBody(lib, ffi, {}, limit or 65536)
+  local body, err = readBody(lib, ffi, {}, limit or 65536, expectedLength)
   return body, err, index
 end
 
@@ -33,6 +33,18 @@ local function fails(script, expected)
 end
 
 return {
+  {'WinHTTP normal EOF before declared length discards partial response', function()
+    local body, err = read({{bytes='partial'}, {available=0}}, nil, 100)
+    assert(body == nil and err == 'network_error')
+  end},
+  {'WinHTTP exact declared binary length succeeds', function()
+    local body, err = read({{bytes='a\0b'}, {available=0}}, nil, 3)
+    assert(body == 'a\0b' and err == nil)
+  end},
+  {'WinHTTP declared zero length accepts empty response', function()
+    local body, err = read({{available=0}}, nil, 0)
+    assert(body == '' and err == nil)
+  end},
   {'WinHTTP query failure before first byte is not EOF', function()
     fails({{queryError=true}})
   end},

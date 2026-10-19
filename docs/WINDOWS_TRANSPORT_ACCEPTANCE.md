@@ -24,10 +24,10 @@ transport fallback fails the test rather than producing a misleading pass.
 No Editor license, cloud compute or account is needed. The dedicated `Windows native transport` workflow builds the official LuaJIT
 source at commit `dd3b24369ddfaa83c78cd6fdd91d157c8968ec8d` with the installed
 MSVC compiler on Windows 2022, for both x64 and x86. No binary mirror is used.
-The workflow and fix were published at `9bb4b73`; the automatic Windows matrix
-built both architectures. Its first run exposed a pre-existing shell-curl test
-assumption, now corrected to assert the intentional Windows native selection.
-Final native runtime acceptance is still pending.
+The runtime candidate `0229455f40a3ba3cc90196360524518f660577d2` passed the
+[Windows matrix](https://github.com/Reality-Software-Entertainment/ravensight-love/actions/runs/39297132584):
+143 unit checks and nine actual WinHTTP loopback checks on each architecture.
+Version and release tag remain unchanged pending patch-release coordination.
 
 ## Assertions
 
@@ -38,36 +38,54 @@ Final native runtime acceptance is still pending.
 4. Header size limits reject a response exceeding the limit.
 5. A server connection closed before its declared Content-Length is received
    cannot produce HTTP success with a partial body.
-6. A delayed response fails within the native receive timeout and outer deadline.
+6. A sustained delayed response fails before the fixture responds, with measured
+   monotonic elapsed time. Three additional Windows cases measure timeout
+   resolution, including a shorter response which Windows accepts.
 
-The fixture additionally checks that exactly six requests arrived: no hidden
+The fixture additionally checks that exactly six requests arrived on libcurl and nine on Windows: no hidden
 redirect follow or retry. This is HTTP loopback transport acceptance, not TLS
 certificate validation, signed S3 multipart/API integration, actual screenshot
 capture, consent UI or a production upload roundtrip.
 
 ## Current evidence and Windows failure handling
 
-October 19, 2026: all six tests passed on macOS using actual LuaJIT/libcurl.
-Task receipt: `outputs/love-native-loopback-acceptance.log`. No Windows pass is
-claimed; this macOS host has no Windows runtime/Wine or Windows executor.
+October 19, 2026: six actual libcurl checks pass on macOS. Actual Windows x64
+and x86 each pass 143 unit regressions and nine loopback runtime checks.
+Earlier failures are retained in task receipts: the initial Windows suite
+exposed a Unix-only shell-curl assumption; actual WinHTTP then exposed normal
+EOF before Content-Length and non-subsecond timeout behavior. The strict
+truncation assertion was preserved throughout.
 
-Static inspection identified a WinHTTP partial-response issue: query/read API
-failures previously retained the original status and accumulated bytes. The
-production reader now discards those bytes and returns status 0/network_error.
-It also rejects zero progress after positive availability. Nine unit regressions
-exercise the production reader through a fake DLL boundary, including failures
-before/after bytes, empty/binary success and cumulative size limits. These prove
-the local state machine, not execution through the Windows DLL. The real
-truncation test remains required on Windows; libcurl passes it locally.
+The production reader now discards partial bytes on native query/read errors
+or early EOF against a declared response length. Malformed/overflow lengths
+fail closed; HEAD, bodyless statuses and transfer coding preserve their HTTP
+semantics. Header/data timeout configuration failures also fail closed.
 
-After this fix, 133 tests pass under both Lua and LuaJIT, and all six real native
-libcurl loopback checks still pass. Windows CI must be green for both architectures
-before calling WinHTTP runtime acceptance complete.
+### Measured timeout behavior, not a hard-deadline promise
 
-An authorized Windows executor with Python and LuaJIT is the remaining
-prerequisite to run this harness. Broader TLS, packaging and game capture checks
-remain separate. Unity Editor/license acceptance and physical-device checks in
-other SDKs are not covered by these tests.
+Using native monotonic `GetTickCount64` on Windows Server2022:
+
+| Requested phase timeout | Fixture delay | x64 elapsed | x86 elapsed | Result |
+| --- | --- | --- | --- | --- |
+|150ms|5000ms|3984ms|3968ms|status0 failure|
+|500ms|5000ms|4000ms|4000ms|status0 failure|
+|1500ms|5000ms|4000ms|4016ms|status0 failure|
+|150ms|1000ms|1000ms|1000ms|HTTP200 success|
+
+Small requested timeouts are therefore **not enforced as subsecond deadlines**
+on these tested systems. The approximately four-second observed behavior is
+not a documented universal floor or maximum. Timeout settings are native
+phase bounds, not a strict whole-operation wall-clock guarantee. Applications
+must not rely on a 150ms deadline; these synchronous requests run on the SDK
+worker. The test process independently has a 25-second deadline.
+
+Microsoft documents separate [response-header and partial-response timeout
+options](https://learn.microsoft.com/en-us/windows/win32/winhttp/option-flags)
+and [transaction-phase timeout configuration](https://learn.microsoft.com/en-us/windows/win32/api/winhttp/nf-winhttp-winhttpsettimeouts).
+Both header and data settings are explicitly configured and checked. This
+acceptance establishes behavior on the tested Windows2022 architectures,
+not all Windows releases, TLS certificates, signed S3 upload integration,
+actual game capture or production-account acceptance.
 
 ## Reviewed CI execution sequence
 

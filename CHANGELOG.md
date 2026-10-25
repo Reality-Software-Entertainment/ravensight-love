@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.2 - 2026-10-25
+
+- Fix natural browser `pagehide` ordering so LÖVE exit-mailbox and health
+  events are queued and flushed before the JavaScript SDK's `game_exited`.
+- Preserve the SDK's existing handler identity and teardown, once-only mailbox
+  delivery, and player opt-out; leave unrelated page listeners untouched.
+- Verify the fix with 16 affected bridge checks and three real love.js/WASM
+  exit cases using an FS-enabled runtime. The documented `Module.FS` exposure
+  remains required for config and exit mailboxes; stock love.js without that
+  export is not covered by this acceptance. No WASM or native transport change.
+
 ## 0.5.1 - 2026-10-19
 
 - Reject partial WinHTTP responses on native read failure or early EOF against

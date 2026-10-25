@@ -222,20 +222,26 @@ test('a tagged line over 32 KB goes to the original print, unparsed', () => {
   assert.deepEqual(calls, [['flush']]);
 });
 
-// A window whose dispatch runs capture listeners first, as a browser does
-// for listeners on the target itself.
+// Natural pagehide on Window can invoke listeners in registration order.
+// Do not let a synthetic capture-first dispatch hide that ordering defect.
 function fakeWindow() {
   const listeners = [];
   return {
     listeners,
     addEventListener(type, fn, opts) {
       const capture = opts === true || Boolean(opts && opts.capture);
-      listeners.push({ type, fn, capture });
+      if (!listeners.some(l => l.type === type && l.fn === fn && l.capture === capture)) {
+        listeners.push({ type, fn, capture });
+      }
+    },
+    removeEventListener(type, fn, opts) {
+      const capture = opts === true || Boolean(opts && opts.capture);
+      const index = listeners.findIndex(l => l.type === type && l.fn === fn && l.capture === capture);
+      if (index >= 0) listeners.splice(index, 1);
     },
     dispatch(type) {
       const event = { type };
-      for (const l of listeners) if (l.type === type && l.capture) l.fn(event);
-      for (const l of listeners) if (l.type === type && !l.capture) l.fn(event);
+      for (const l of [...listeners]) if (l.type === type) l.fn(event);
     },
   };
 }
@@ -254,11 +260,13 @@ function fakeFS(text) {
   };
 }
 
-test('exit mailbox: tracked from Module.FS in a capture listener, before the SDK flush and its own pagehide', () => {
+test('exit mailbox: registered after the SDK, still tracks before its own pagehide exactly once', () => {
   const { rs, calls } = fakeRs();
   const win = fakeWindow();
   // The page SDK registered its own pagehide handler first, without capture.
-  win.addEventListener('pagehide', () => calls.push(['sdk pagehide: game_exited']));
+  rs._onPageHide = () => calls.push(['sdk pagehide: game_exited']);
+  rs._pageHideBound = true;
+  win.addEventListener('pagehide', rs._onPageHide);
   const { Module } = fakeModule();
   Module.FS = fakeFS(JSON.stringify([
     { event: 'run_abandoned', data: { sector: 3 } },
@@ -267,7 +275,9 @@ test('exit mailbox: tracked from Module.FS in a capture listener, before the SDK
     { event: '' },
   ]));
   installRavensightBridge(rs, Module, { window: win, storage: memoryStorage() });
-  assert.equal(win.listeners[1].capture, true);
+  assert.equal(win.listeners[0].capture, true);
+  assert.equal(win.listeners[1].fn, rs._onPageHide);
+  assert.equal(win.listeners.filter(l => l.fn === rs._onPageHide).length, 1);
   win.dispatch('pagehide');
   assert.deepEqual(calls, [
     ['track', 'run_abandoned', { sector: 3 }],
@@ -279,6 +289,38 @@ test('exit mailbox: tracked from Module.FS in a capture listener, before the SDK
   calls.length = 0;
   win.dispatch('pagehide');
   assert.deepEqual(calls, [['flush'], ['sdk pagehide: game_exited']], 'a second pagehide sends nothing twice');
+});
+
+test('exit mailbox: preserves unrelated listeners and the original SDK handler for teardown', () => {
+  const { rs, calls } = fakeRs();
+  const win = fakeWindow();
+  const first = () => calls.push(['unrelated first']);
+  const last = () => calls.push(['unrelated last']);
+  const sdkHandler = () => calls.push(['sdk pagehide']);
+  rs._onPageHide = sdkHandler;
+  rs._pageHideBound = true;
+  win.addEventListener('pagehide', first);
+  win.addEventListener('pagehide', sdkHandler);
+  win.addEventListener('pagehide', last);
+  installRavensightBridge(rs, fakeModule().Module, { window: win, storage: memoryStorage() });
+  win.dispatch('pagehide');
+  assert.deepEqual(calls, [['unrelated first'], ['unrelated last'], ['flush'], ['sdk pagehide']]);
+  assert.equal(rs._onPageHide, sdkHandler);
+  assert.equal(rs._pageHideBound, true);
+  win.removeEventListener('pagehide', rs._onPageHide);
+  calls.length = 0;
+  win.dispatch('pagehide');
+  assert.deepEqual(calls, [['unrelated first'], ['unrelated last'], ['flush']]);
+});
+
+test('exit mailbox: does not activate an SDK pagehide handler that is not bound', () => {
+  const { rs, calls } = fakeRs();
+  const win = fakeWindow();
+  rs._onPageHide = () => calls.push(['inactive sdk pagehide']);
+  rs._pageHideBound = false;
+  installRavensightBridge(rs, fakeModule().Module, { window: win, storage: memoryStorage() });
+  win.dispatch('pagehide');
+  assert.deepEqual(calls, [['flush']]);
 });
 
 test('exit mailbox: the flush prefers flushOnHidden, then _flushOnHidden, then flush', () => {

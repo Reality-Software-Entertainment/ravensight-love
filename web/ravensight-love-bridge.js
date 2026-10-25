@@ -223,8 +223,9 @@ export function installRavensightBridge(rs, Module, options = {}) {
     return original.apply(this, args);
   };
 
-  // The exit mailbox. Capture phase, so it runs before the SDK's own
-  // pagehide listener; best effort, and it never throws into the page.
+  // The exit mailbox. Natural pagehide on Window can follow registration
+  // order even with capture, so also place the supplied SDK's handler after
+  // this one. Best effort; it never throws into the page.
   const win = 'window' in options ? options.window : defaultWindow();
   if (win && typeof win.addEventListener === 'function') {
     win.addEventListener('pagehide', () => {
@@ -279,6 +280,16 @@ export function installRavensightBridge(rs, Module, options = {}) {
         return typeof rs.flush === 'function' ? rs.flush() : undefined;
       });
     }, { capture: true });
+    // ravensight-js normally binds before the bridge is installed. Re-register
+    // only that client's existing listener, keeping its identity and capture
+    // flag so the SDK can still remove it during teardown. Other clients and
+    // page listeners are untouched; an unbound SDK must stay unbound.
+    if (rs._pageHideBound === true && typeof rs._onPageHide === 'function' && typeof win.removeEventListener === 'function') {
+      guard('exit order', () => {
+        win.removeEventListener('pagehide', rs._onPageHide, false);
+        win.addEventListener('pagehide', rs._onPageHide, false);
+      });
+    }
   }
   return Module;
 }

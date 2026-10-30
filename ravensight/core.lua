@@ -84,6 +84,25 @@ function Core.saveChoice(storage, consent, enabled)
   end
 end
 
+--- A unix millisecond clock from a whole-second wall clock and a monotonic
+--- timer, because os.time has no fraction. The two are lined up on first use
+--- and again whenever they disagree by more than two seconds (the player set
+--- the clock, or the machine slept). It can read up to a second early, but it
+--- only moves forward between those, which is what keeps events in order.
+--- @param time function unix seconds
+--- @param now function monotonic seconds
+--- @return function unix milliseconds, a whole number
+function Core.wallClockMs(time, now)
+  local wallAnchor, monotonicAnchor
+  return function()
+    local wall, monotonic = time(), now()
+    if not wallAnchor or math.abs(wallAnchor + (monotonic - monotonicAnchor) - wall) > 2 then
+      wallAnchor, monotonicAnchor = wall, monotonic
+    end
+    return math.floor((wallAnchor + (monotonic - monotonicAnchor)) * 1000)
+  end
+end
+
 --- Builds an event id from its parts: the first 16 characters of the device
 --- id, the start time in hex, a per-launch nonce and a counter.
 function Core.eventId(deviceId, startTime, nonce, counter)
@@ -120,7 +139,9 @@ end
 ---                                   status is 0 for a network failure and
 ---                                   headers is a table of lowercased names
 ---   now()                           seconds, monotonic, for timers
----   time()                          unix seconds, for timestamps and expiry
+---   time()                          unix seconds, for expiry
+---   timeMs()                        unix milliseconds, for event timestamps,
+---                                   default Core.wallClockMs(time, now)
 ---   storage                         {read(name), write(name, text), remove(name)}
 ---   randomHex(bytes)                cryptographically random lowercase hex
 ---   platform, osName                e.g. "macOS" and "macos"
@@ -141,6 +162,7 @@ function Core.new(deps)
   self.send = assert(deps.send, 'ravensight: core needs send')
   self.now = deps.now or os.clock
   self.time = deps.time or os.time
+  self.timeMs = deps.timeMs or Core.wallClockMs(self.time, self.now)
   self.storage = deps.storage or { read = noop, write = noop, remove = noop }
   self.randomHex = assert(deps.randomHex, 'ravensight: core needs randomHex')
   self.platform = deps.platform or 'unknown'
@@ -618,7 +640,7 @@ function Core:enqueue(name, data)
     for k, v in pairs(self.playtestTags) do eventData[k] = v end
   end
   eventData.rs_event_id = self:nextEventId()
-  local timestamp = self.time()
+  local timestamp = self.timeMs()
   if Core.eventBytes(eventData) > Core.MAX_EVENT_BYTES then
     if not self.warnedTooLarge then
       self.warnedTooLarge = true

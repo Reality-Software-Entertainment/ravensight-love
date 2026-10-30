@@ -83,9 +83,43 @@ return {
     assert(h.fired('session_ready'))
     local batch = h.answer('/api/v1/track/batch', 202)
     eq(h.batchBody(batch)[1].event, 'game_started')
-    eq(h.batchBody(batch)[1].timestamp, 1800000000)
+    eq(h.batchBody(batch)[1].timestamp, 1800000000000)
     eq(batch.headers['X-Session-Token'], 'ses_1')
     eq(h.fired('events_flushed')[2], 1)
+  end },
+  { 'two events in one second keep their milliseconds, in order, in the sent JSON', function()
+    local h = harness()
+    h.boot()
+    h.clock = 0.25
+    h.core:track('first')
+    h.clock = 0.7
+    h.core:track('second')
+    h.openSession()
+    local batch = h.answer('/api/v1/track/batch', 202)
+    local stamps = {}
+    for _, e in ipairs(h.batchBody(batch)) do stamps[e.event] = e.timestamp end
+    eq(stamps.first, 1800000000250)
+    eq(stamps.second, 1800000000700)
+    assert(batch.body:find('1800000000700', 1, true), 'the number is written out whole: ' .. batch.body)
+  end },
+  { 'the millisecond clock lines up again when the wall clock jumps', function()
+    local wall, monotonic = 1800000000, 5
+    local clock = Core.wallClockMs(function() return wall end, function() return monotonic end)
+    eq(clock(), 1800000000000)
+    monotonic = 5.5
+    eq(clock(), 1800000000500)
+    wall, monotonic = 1800003600, 6
+    eq(clock(), 1800003600000)
+  end },
+  { 'a queue saved in seconds by an older version is sent as it was recorded', function()
+    local h = harness({ files = { [Core.QUEUE_FILE] = '[{"event":"old","data":{},"timestamp":1799999000}]' } })
+    h.boot()
+    h.openSession()
+    local batch = h.answer('/api/v1/track/batch', 202)
+    local stamps = {}
+    for _, e in ipairs(h.batchBody(batch)) do stamps[e.event] = e.timestamp end
+    eq(stamps.old, 1799999000)
+    assert(stamps.game_started > 1e11, 'and the new events are in milliseconds')
   end },
   { 'the server kill switch stops everything and says so', function()
     local h = harness()

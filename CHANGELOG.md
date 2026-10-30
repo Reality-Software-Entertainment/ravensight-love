@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Event timestamps are unix milliseconds on native builds, so events in one
+  second keep their order in funnels and sessions. `os.time` has no fraction,
+  so the clock is the wall clock lined up with `love.timer`; it can read up to
+  a second early and only moves forward. Needs a Ravensight server that keeps
+  milliseconds. Older versions keep working unchanged, and a queue saved by an
+  older version is sent as it was recorded. love.js builds take their stamp from
+  the JavaScript SDK on the page, so they need ravensight-js with milliseconds.
+
 ## 0.6.0 - 2026-11-06
 
 - Automatic error capture, on by default: `love.errorhandler` is wrapped and

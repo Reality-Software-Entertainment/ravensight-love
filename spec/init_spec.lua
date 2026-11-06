@@ -5,6 +5,20 @@ local json = require('ravensight.json')
 
 local function eq(a, b, msg) assert(a == b, (msg or '') .. ' expected ' .. tostring(b) .. ', got ' .. tostring(a)) end
 
+--- The saved queue's events in order (format version 2, any key), or nil.
+local function savedQueue(files)
+  for name, text in pairs(files) do
+    if name:match('^ravensight/queue%-%x+%.json$') then
+      local out = {}
+      for _, g in ipairs(json.decode(text).groups) do
+        for _, e in ipairs(g.events) do out[#out + 1] = e end
+      end
+      return out
+    end
+  end
+  return nil
+end
+
 --- A fresh copy of the SDK on a fake LÖVE, with print captured.
 local function boot(os, files)
   for name in pairs(package.loaded) do
@@ -601,7 +615,7 @@ return {
       local loop = love.errorhandler('main.lua:3: boom for jane@example.com')
       eq(w.handled[1], 'main.lua:3: boom for jane@example.com', 'the previous handler saw the same message')
       eq(type(loop), 'function', 'the error screen loop is still returned')
-      local saved = json.decode(w.files['ravensight_queue.json'])
+      local saved = savedQueue(w.files)
       local crash = saved[#saved]
       eq(crash.event, 'error'); eq(crash.data.rs_source, 'crash'); eq(crash.data.rs_kind, 'error')
       eq(crash.data.rs_severity, 'critical')
@@ -613,7 +627,7 @@ return {
       local last = json.decode(sent[#sent].body)
       eq(last.events[#last.events].data.rs_source, 'crash')
       eq(loop(), nil)
-      eq(w.files['ravensight_queue.json'], nil, 'nothing left to resend next launch')
+      eq(savedQueue(w.files), nil, 'nothing left to resend next launch')
       eq(loop(), nil)
       eq(w.loopRuns, 2, 'the game error loop ran every frame')
     end)
@@ -630,7 +644,7 @@ return {
       for _ = 1, 5 do loop() end
       eq(#sent, before, 'no request from the error screen')
       eq(w.loopRuns, 5)
-      local saved = json.decode(w.files['ravensight_queue.json'])
+      local saved = savedQueue(w.files)
       eq(saved[#saved].data.rs_source, 'crash', 'saved for the next launch')
     end)
   end },
@@ -669,7 +683,7 @@ return {
       local sent = errorWorld(w, {})
       w.sdk.init({ ingestKey = 'gt_live_k', synchronous = true })
       love.errorhandler('main.lua:1: early') -- before any answer
-      eq(w.files['ravensight_queue.json'], nil, 'not in the queue before the answer')
+      eq(savedQueue(w.files), nil, 'not in the queue before the answer')
       assert(w.files['ravensight_crash.json'], 'in the crash file')
       for _ = 1, 3 do w.sdk.update(0) end
       w.clock = 10; w.sdk.update(0); w.sdk.update(0)
@@ -712,7 +726,7 @@ return {
       end
       assert(found, 'the saved crash was sent on the next launch')
       eq(found.data.rs_message, 'main.lua:4: crash in love.load')
-      eq(found.timestamp, crashedAt, 'with the time of the crash')
+      eq(found.timestamp, crashedAt * 1000, 'with the time of the crash, in milliseconds')
       eq(files['ravensight_crash.json'], nil, 'the crash file is gone')
     end)
   end },
@@ -812,7 +826,7 @@ return {
       w.clock = 1.5
       print('Ravensight: pretending to be the SDK')
       love.errorhandler('cave.lua:9: nil')
-      local saved = json.decode(w.files['ravensight_queue.json'])
+      local saved = savedQueue(w.files)
       local trail = saved[#saved].data.rs_trail
       eq(trail, '+0 info player 3 entered cave from [ip]')
       eq(w.lines[#w.lines - 1], 'player 3 entered cave from 10.1.2.3', 'print still prints, unchanged')

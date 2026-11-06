@@ -116,14 +116,84 @@ local function randomHex(count)
   return toHex(table.concat(out))
 end
 
+--- Creates the folder a file goes in, in the save folder. Always asked,
+--- never checked first: getInfo also sees the game's own files, and the
+--- SDK's module folder is called ravensight too.
+local function ensureFolder(name)
+  local folder = name:match('^(.*)/[^/]+$')
+  if folder and love.filesystem.createDirectory then love.filesystem.createDirectory(folder) end
+end
+
+--- Renames `from` over `to` (real paths), replacing it. POSIX rename does
+--- that in one step; on Windows MoveFileExW with MOVEFILE_REPLACE_EXISTING
+--- does, given UTF-16 paths.
+local function renameOver(from, to)
+  local okFfi, ffi = pcall(require, 'ffi')
+  if okFfi and ffi.os == 'Windows' then
+    pcall(ffi.cdef, [[
+      int MultiByteToWideChar(unsigned int, unsigned long, const char*, int, wchar_t*, int);
+      int MoveFileExW(const wchar_t*, const wchar_t*, unsigned long);
+    ]])
+    local function wide(text)
+      local n = ffi.C.MultiByteToWideChar(65001, 0, text, -1, nil, 0)
+      if n <= 0 then return nil end
+      local buf = ffi.new('wchar_t[?]', n)
+      ffi.C.MultiByteToWideChar(65001, 0, text, -1, buf, n)
+      return buf
+    end
+    local a, b = wide(from), wide(to)
+    local okLib, kernel = pcall(ffi.load, 'kernel32')
+    if not (a and b and okLib) then return false end
+    -- MOVEFILE_REPLACE_EXISTING (1) | MOVEFILE_WRITE_THROUGH (8)
+    return kernel.MoveFileExW(a, b, 9) ~= 0
+  end
+  return os.rename(from, to) == true
+end
+
 local storage = {
   read = function(name)
     if not love.filesystem.getInfo(name) then return nil end
     return love.filesystem.read(name)
   end,
-  write = function(name, text) love.filesystem.write(name, text) end,
+  write = function(name, text)
+    ensureFolder(name)
+    love.filesystem.write(name, text)
+  end,
   remove = function(name) love.filesystem.remove(name) end,
+  --- Writes a temporary file and renames it over `name`, so a partial
+  --- write never replaces a good file. Where a rename is not possible (no
+  --- real save folder) it writes the file directly.
+  replace = function(name, text)
+    ensureFolder(name)
+    local tmp = name .. '.tmp'
+    local dir = love.filesystem.getSaveDirectory and love.filesystem.getSaveDirectory()
+    if dir and dir ~= '' and love.filesystem.write(tmp, text) then
+      if renameOver(dir .. '/' .. tmp, dir .. '/' .. name) then return true end
+      love.filesystem.remove(tmp)
+    end
+    return love.filesystem.write(name, text)
+  end,
 }
+
+--- gzip, SHA-256 and the GPU name from LÖVE where it has them.
+local function gzipFunction()
+  if not (love.data and love.data.compress) then return nil end
+  return function(text) return love.data.compress('string', 'gzip', text) end
+end
+
+local function sha256Function()
+  if not (love.data and love.data.hash) then return nil end
+  return function(bytes) return love.data.hash('sha256', bytes) end
+end
+
+local function deviceFields()
+  local fields = {}
+  if love.graphics and love.graphics.getRendererInfo then
+    local ok, _, _, _, device = pcall(love.graphics.getRendererInfo)
+    if ok and type(device) == 'string' then fields.gpu = device end
+  end
+  return fields
+end
 
 -- --------------------------------------------------------------- playtest
 
@@ -288,8 +358,10 @@ local function releaseHeld()
       local queued = core:enqueueError('error', entry.data)
       -- Keep the time of the crash, not of this send.
       if queued and type(entry.timestamp) == 'number' then
+        -- Held in unix seconds; the queue keeps milliseconds.
+        local ms = entry.timestamp < 1e12 and entry.timestamp * 1000 or entry.timestamp
         for _, e in ipairs(core.pending) do
-          if e.data == queued then e.timestamp = entry.timestamp end
+          if e.data == queued then e.timestamp = ms end
         end
       end
     end
@@ -493,6 +565,9 @@ function ravensight.init(options)
     consent = config.consent,
     distribution = config.distribution,
     random = love.math and love.math.random or math.random,
+    gzip = gzipFunction(),
+    sha256 = sha256Function(),
+    device = deviceFields(),
   })
   startNetwork()
   -- The session answer carries the game's switch: it releases or discards
@@ -714,6 +789,46 @@ function ravensight.on(name, fn)
   assert(initialized, 'ravensight.on: call ravensight.init() first')
   if not core then return function() end end
   return core:on(name, fn)
+end
+
+-- ------------------------------------------------------ ads and attribution
+
+--- An ad lifecycle step (see Typed.ad). Returns true when queued, or false
+--- and the reason it was refused; nothing malformed is sent.
+function ravensight.trackAd(network, format, result, opts)
+  local name, props = Typed.ad(network, format, result, opts)
+  if not name then
+    log('warn', 'ad event not sent: ' .. props)
+    return false, props
+  end
+  ravensight.track(name, props)
+  return true
+end
+
+--- A paid impression: trackAd with result "shown". revenueMicros is a digit
+--- string of micros (0.0015 USD is "1500"), never a float.
+function ravensight.trackAdRevenue(network, format, placement, revenueMicros, currency, opts)
+  local merged = {}
+  for k, v in pairs(opts or {}) do merged[k] = v end
+  merged.placement, merged.revenueMicros, merged.currency = placement, revenueMicros, currency
+  return ravensight.trackAd(network, format, 'shown', merged)
+end
+
+ravensight.microsFromDecimalString = Typed.microsFromDecimalString
+ravensight.microsFromRevenue = Typed.microsFromRevenue
+
+--- Where this install was acquired, sent once per install. Returns true
+--- when queued, or false and why.
+function ravensight.setAttribution(attribution)
+  if not core or not core.setAttribution then return false, 'not_started' end
+  return core:setAttribution(attribution)
+end
+
+--- Events let go of since launch: dropped_overflow, dropped_too_old and
+--- dropped_refused. Empty in a web build, where the page delivers.
+function ravensight.getDeliveryStats()
+  if core and core.getDeliveryStats then return core:getDeliveryStats() end
+  return {}
 end
 
 --- Switch into playtest mode by hand. Normally read from the environment.

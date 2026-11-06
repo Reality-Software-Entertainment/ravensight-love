@@ -11,6 +11,12 @@
 --   __RAVENSIGHT__ {"v":1,"op":"enabled","value":false}
 --   __RAVENSIGHT__ {"v":1,"op":"flush"}
 --   __RAVENSIGHT__ {"v":1,"op":"health","data":{...}}
+--   __RAVENSIGHT__ {"v":1,"op":"config_read","key":"..."}
+--
+-- config_read tells the page the game used a config value, once per config
+-- answer, so the page's SDK can count the experiment exposure (its own
+-- getConfig is what marks one). Delivery (the saved queue, origins,
+-- compression, signing) is the page SDK's.
 --
 -- The health line (only with performance = true) is not sent when it
 -- arrives: the bridge keeps the latest one and sends it as a `health` event
@@ -70,6 +76,7 @@ function Web.new(deps)
   self.configCounter = 0
   self.configPending = nil
   self.configStarted = false
+  self.configReadSent = false
   self.readConfig = deps.readConfig or function()
     local file = io.open('/tmp/ravensight-config.json', 'r')
     if not file then return nil end
@@ -230,7 +237,25 @@ function Web:fetchConfig()
 end
 function Web:getConfig(key, fallback)
   if not self.trackingEnabled then return fallback end
+  if not self.configReadSent and type(key) == 'string' then
+    self.configReadSent = true
+    self:send({ op = 'config_read', key = key })
+  end
   return Config.get(self.configValues, key, fallback)
+end
+
+--- Sent once per install, with the flag kept in the game's own save folder.
+function Web:setAttribution(attribution)
+  if not self.trackingEnabled then return false, 'tracking_disabled' end
+  if self.storage.read(Core.ATTRIBUTION_FILE) then return false, 'already_sent' end
+  local name, props = require(prefix .. 'typed').attribution(attribution)
+  if not name then
+    self.log('warn', 'attribution event not sent: ' .. props)
+    return false, props
+  end
+  self:track(name, props)
+  self.storage.write(Core.ATTRIBUTION_FILE, '1')
+  return true
 end
 function Web:update()
   if not self.trackingEnabled then return end
@@ -241,6 +266,7 @@ function Web:update()
   if type(result) == 'table' and result.id == self.configPending and Config.values(result.values) and (result.source == 'network' or result.source == 'cache' or result.source == 'default') then
     self.configPending = nil
     self.configValues = result.values
+    self.configReadSent = false
     self:emit('config_ready', result.source)
   elseif self.time() >= self.configDeadline then
     self.configPending = nil

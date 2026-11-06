@@ -91,7 +91,7 @@ function defaultWindow() {
   return typeof globalThis.window === 'object' && globalThis.window ? globalThis.window : null;
 }
 
-const KNOWN_OPS = new Set(['track', 'feedback', 'enabled', 'flush', 'health', 'config']);
+const KNOWN_OPS = new Set(['track', 'feedback', 'enabled', 'flush', 'health', 'config', 'config_read']);
 
 /**
  * Wraps Module.print so tagged lines from the Lua SDK reach `rs`.
@@ -178,6 +178,13 @@ export function installRavensightBridge(rs, Module, options = {}) {
         });
         return true;
       }
+      case 'config_read':
+        // The game used a config value: the page SDK's own read is what
+        // counts an experiment exposure.
+        if (enabled && typeof msg.key === 'string' && typeof rs.getConfig === 'function') {
+          guard('config_read', () => rs.getConfig(msg.key, null));
+        }
+        return true;
       case 'track':
         guard('track', () => rs.track(msg.event, msg.data || {}));
         return true;

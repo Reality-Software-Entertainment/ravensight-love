@@ -8,9 +8,11 @@
 -- caller hands both to the generic track, so queueing, batching, retries,
 -- opt-out and the playtest path are unchanged.
 --
--- Nothing here validates or throws. Money is passed through as given: the
+-- Nothing here throws. Purchase money is passed through as given: the
 -- server stores a wrong amount as a flagged event (`rs_invalid`), which shows
--- on the Implementation health card.
+-- on the Implementation health card. The ad and attribution builders check
+-- their fields and refuse a malformed event, so revenue without a currency
+-- or a fractional amount of micros is never sent.
 --
 -- MIT licensed, part of ravensight-love.
 
@@ -101,6 +103,130 @@ function Typed.error(severity, message, opts)
   set(out, 'rs_message', Typed.cut(message, Typed.MAX_MESSAGE_CHARS))
   set(out, 'rs_stack', Typed.cut(opts.stack, Typed.MAX_STACK_CHARS))
   return opts.name or 'error', out
+end
+
+--- Characters as the server counts them: UTF-16 code units of UTF-8 text.
+--- Each character is one unit, and one written in four bytes is two.
+function Typed.utf16Length(text)
+  local units = 0
+  for i = 1, #text do
+    local b = text:byte(i)
+    if b < 0x80 or b >= 0xC0 then units = units + 1 end
+    if b >= 0xF0 then units = units + 1 end
+  end
+  return units
+end
+
+-- -------------------------------------------------------- ads and attribution
+
+Typed.AD_FORMATS = { banner = true, interstitial = true, rewarded = true, native = true, app_open = true, other = true }
+Typed.AD_RESULTS = { shown = true, clicked = true, failed = true, rewarded = true }
+
+local function text(value, max)
+  return type(value) == 'string' and value ~= '' and Typed.utf16Length(value) <= max
+end
+
+local function present(value)
+  return value ~= nil and value ~= ''
+end
+
+--- Revenue as the contract wants it: a digit string of 1 to 18 digits, from
+--- a digit string or a whole non-negative number; nil for anything else
+--- (a fraction, a decimal string, a negative).
+local function microsText(value)
+  if type(value) == 'string' and value:match('^%d+$') and #value <= 18 then return value end
+  if type(value) == 'number' and value >= 0 and value % 1 == 0 and value <= 9007199254740991 then
+    return string.format('%d', value)
+  end
+  return nil
+end
+
+--- One ad lifecycle step. network is 1 to 64 characters, format one of
+--- banner, interstitial, rewarded, native, app_open, other, result one of
+--- shown, clicked, failed, rewarded. opts: placement (1 to 100), revenueMicros
+--- and currency (on shown only, together), name (default "rs_ad"), props.
+--- Returns name, props, or nil and the reason it was refused.
+function Typed.ad(network, format, result, opts)
+  opts = opts or {}
+  if not text(network, 64) then return nil, 'network is 1 to 64 characters' end
+  if not Typed.AD_FORMATS[format] then return nil, 'format is banner, interstitial, rewarded, native, app_open or other' end
+  if not Typed.AD_RESULTS[result] then return nil, 'result is shown, clicked, failed or rewarded' end
+  local out = merged(opts.props)
+  out.rs_kind = 'ad'
+  out.rs_ad_network = network
+  out.rs_ad_format = format
+  out.rs_ad_result = result
+  if present(opts.placement) then
+    if not text(opts.placement, 100) then return nil, 'placement is at most 100 characters' end
+    out.rs_ad_placement = opts.placement
+  end
+  if opts.revenueMicros ~= nil then
+    local micros = microsText(opts.revenueMicros)
+    if not micros then return nil, 'revenueMicros is a digit string of 1 to 18 digits, never a fraction' end
+    if result ~= 'shown' then return nil, 'revenue goes on a shown ad only' end
+    if type(opts.currency) ~= 'string' or not opts.currency:match('^%a%a%a$') then return nil, 'revenue needs a three letter currency' end
+    out.rs_revenue_micros = micros
+    out.rs_currency = opts.currency:upper()
+  elseif opts.currency ~= nil then
+    return nil, 'a currency is sent only with revenue'
+  end
+  return opts.name or 'rs_ad', out
+end
+
+--- Where this device was acquired. attribution: source (required, 1 to 64:
+--- utm, store_referrer, organic or a partner name), network (1 to 100),
+--- campaign, adset, creative (1 to 200 each), touchTime (epoch ms), name
+--- (default "rs_attribution"). Empty fields are left out. Returns name,
+--- props, or nil and the reason.
+function Typed.attribution(attribution)
+  attribution = attribution or {}
+  if not text(attribution.source, 64) then return nil, 'source is 1 to 64 characters' end
+  local out = { rs_kind = 'attribution', rs_attr_source = attribution.source }
+  for _, field in ipairs({ { 'network', 'rs_attr_network', 100 }, { 'campaign', 'rs_campaign', 200 }, { 'adset', 'rs_adset', 200 }, { 'creative', 'rs_creative', 200 } }) do
+    local value = attribution[field[1]]
+    if present(value) then
+      if not text(value, field[3]) then return nil, field[1] .. ' is at most ' .. field[3] .. ' characters' end
+      out[field[2]] = value
+    end
+  end
+  local touch = attribution.touchTime
+  if touch ~= nil then
+    if type(touch) ~= 'number' or touch < 0 or touch % 1 ~= 0 or touch > 9007199254740991 then
+      return nil, 'touchTime is whole epoch milliseconds'
+    end
+    out.rs_touch_time = touch
+  end
+  return attribution.name or 'rs_attribution', out
+end
+
+--- Micros from decimal text in major units, worked on the digits so no
+--- float is ever multiplied: "0.0015" is "1500", "1.23456789" is "1234568"
+--- (half up at the seventh decimal). nil for anything that is not a plain
+--- non-negative decimal or does not fit 18 digits.
+function Typed.microsFromDecimalString(value)
+  if type(value) ~= 'string' then return nil end
+  local whole, fraction = value:match('^%s*(%d*)%.?(%d*)%s*$')
+  if not whole or (whole == '' and fraction == '') or (value:find('%.') == nil and fraction ~= '') then return nil end
+  fraction = fraction .. '0000000'
+  local digits = (whole .. fraction:sub(1, 6)):gsub('^0+', '')
+  if digits == '' then digits = '0' end
+  if fraction:byte(7) >= 53 then
+    local bytes = { digits:byte(1, -1) }
+    local i = #bytes
+    while i >= 1 and bytes[i] == 57 do bytes[i] = 48; i = i - 1 end
+    if i >= 1 then bytes[i] = bytes[i] + 1 else table.insert(bytes, 1, 49) end
+    digits = string.char(unpack(bytes))
+  end
+  if #digits > 18 then return nil end
+  return digits
+end
+
+--- Micros from a mediation callback's revenue number in major units: it is
+--- formatted to 6 decimals by string.format, then converted on its digits.
+--- nil for a negative, infinite or NaN value.
+function Typed.microsFromRevenue(value)
+  if type(value) ~= 'number' or value ~= value or value < 0 or value == math.huge then return nil end
+  return Typed.microsFromDecimalString(string.format('%.6f', value))
 end
 
 -- ------------------------------------------------------------------ health

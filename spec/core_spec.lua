@@ -33,8 +33,11 @@ local function harness(opts)
     playtest = opts.playtest,
     consent = opts.consent,
     distribution = opts.distribution,
-    -- 0.5 is no jitter at all, so the timing tests read exact numbers.
-    random = opts.random or function() return 0.5 end,
+    -- 1 is a jitter factor of exactly 1, so the timing tests read exact
+    -- numbers (a real random() is below 1, so the factor is too).
+    random = opts.random or function() return 1 end,
+    gzip = opts.gzip,
+    device = opts.device,
   })
   for _, name in ipairs({ 'session_ready', 'session_failed', 'tracking_disabled', 'events_flushed', 'flush_failed', 'feedback_submitted', 'feedback_failed' }) do
     h.core:on(name, function(...) table.insert(h.events, { name, ... }) end)
@@ -55,6 +58,16 @@ local function harness(opts)
     return h.answer('/api/v1/session', 201, { token = 'ses_1', expiresIn = 3600 })
   end
   function h.batchBody(req) return json.decode(req.body).events end
+  --- The saved queue's events in order, or nil when there is no file.
+  function h.saved(files)
+    local text = (files or h.files)[Core.queueFile('gt_live_k')]
+    if not text then return nil end
+    local out = {}
+    for _, g in ipairs(json.decode(text).groups) do
+      for _, e in ipairs(g.events) do out[#out + 1] = e end
+    end
+    return out
+  end
   function h.fired(name)
     for _, e in ipairs(h.events) do if e[1] == name then return e end end
   end
@@ -283,7 +296,7 @@ return {
     eq(h.core.quitReady, false)
     eq(h.batchBody(h.answer('/api/v1/track/batch', 202))[1].event, 'game_exited')
     eq(h.core.quitReady, true)
-    eq(h.files[Core.QUEUE_FILE], nil)
+    eq(h.saved(), nil)
   end },
   { 'quitting gives up after 1.5 seconds and saves what was not sent', function()
     local h = harness()
@@ -294,7 +307,7 @@ return {
     h.core:beginQuit()
     h.clock = 1.6; h.core:update()
     eq(h.core.quitReady, true)
-    local saved = json.decode(h.files[Core.QUEUE_FILE])
+    local saved = h.saved()
     eq(saved[#saved].event, 'game_exited')
   end },
   { 'quitting offline quits at once and the next launch sends the saved events', function()
@@ -304,14 +317,15 @@ return {
     h.core:track('offline_play', {})
     h.answer('/api/v1/session', 0)
     eq(h.core:beginQuit(), false)
-    assert(h.files[Core.QUEUE_FILE])
+    assert(h.saved())
     local next = harness({ files = h.files })
     next.boot()
-    eq(next.files[Core.QUEUE_FILE], nil)
+    assert(next.saved(), 'the file stays until the events are delivered')
     next.openSession()
     local names = {}
     for _, e in ipairs(next.batchBody(next.answer('/api/v1/track/batch', 202))) do names[#names + 1] = e.event end
     eq(table.concat(names, ','), 'game_started,offline_play,game_exited,game_started')
+    eq(next.saved(), nil, 'delivered, so the file is gone')
   end },
   { 'feedback needs a session, and says why when it fails', function()
     local h = harness()
@@ -538,8 +552,8 @@ return {
 
   -- ---------------------------------------------- 0.3.0: a refused key
 
-  { 'a 401 on settings ends the run: no session, no retry, nothing saved', function()
-    local h = harness({ files = { [Core.QUEUE_FILE] = '[{"event":"old","data":{},"timestamp":1}]' } })
+  { 'a 401 on settings ends the run: no session, no retry, the queue kept for the next launch', function()
+    local h = harness({ files = { [Core.QUEUE_FILE] = '[{"event":"old","data":{},"timestamp":1799999000000}]' } })
     h.core:start()
     eq(#h.core.pending, 1, 'the saved queue was loaded')
     h.answer('/api/v1/settings', 401, { error = 'invalid_api_key' })
@@ -551,7 +565,8 @@ return {
     for t = 1, 400, 10 do h.clock = t; h.core:update() end
     eq(#h.requests, 0, 'never retried')
     eq(h.core:beginQuit(), false)
-    eq(h.files[Core.QUEUE_FILE], nil, 'nothing saved on quit')
+    eq(#h.saved(), 1, 'the queued event stays on disk')
+    eq(h.saved()[1].event, 'old', 'and nothing tracked after the refusal is added')
     local logged = 0
     for _, line in ipairs(h.logs) do if line:find('ingest key was refused', 1, true) then logged = logged + 1 end end
     eq(logged, 1, 'logged once')
@@ -604,20 +619,20 @@ return {
     eq(h.core:beginQuit(), true)
     h.answer('/api/v1/session', 401)
     eq(h.core.quitReady, true)
-    eq(h.files[Core.QUEUE_FILE], nil)
+    eq(#h.saved(), 3, 'the queued events stay on disk for the next launch')
   end },
 
   -- --------------------------------------------------- 0.3.0: jitter
 
-  { 'backoff carries plus or minus 20 percent jitter from deps.random', function()
+  { 'backoff is multiplied by a factor from 0.5 up to 1 from deps.random', function()
     local low = harness({ random = function() return 0 end })
     low.boot(); low.openSession()
     low.answer('/api/v1/track/batch', 500)
-    eq(low.core.retryAt, 8)
-    local high = harness({ random = function() return 1 end })
+    eq(low.core.retryAt, 5)
+    local high = harness({ random = function() return 0.999 end })
     high.boot(); high.openSession()
     high.answer('/api/v1/track/batch', 500)
-    assert(math.abs(high.core.retryAt - 12) < 1e-9, 'expected 12, got ' .. high.core.retryAt)
+    assert(math.abs(high.core.retryAt - 9.995) < 1e-9, 'expected 9.995, got ' .. high.core.retryAt)
   end },
   { 'jitter never takes a wait past 5 minutes or under half a second', function()
     local h = harness({ random = function() return 1 end })
@@ -662,7 +677,7 @@ return {
     h.answer('/api/v1/session', 0)
     h.core:beginQuit()
     local ids = {}
-    for _, e in ipairs(json.decode(h.files[Core.QUEUE_FILE])) do ids[e.event] = e.data.rs_event_id end
+    for _, e in ipairs(h.saved()) do ids[e.event] = e.data.rs_event_id end
     assert(ids.offline, 'saved with its id')
     local next = harness({ files = h.files })
     next.core.randomHex = function(n) return string.rep('cd', n) end   -- another launch, another nonce

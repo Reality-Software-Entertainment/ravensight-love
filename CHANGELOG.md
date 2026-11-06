@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+Held until the Ravensight server release that accepts origins, signatures,
+gzip bodies and the ad and attribution keys is deployed. The version is set
+at release.
+
+### Breaking
+
+- Experiment tags follow the exposure contract: `rs_exp_<key>` only after the game's first `getConfig` read in a session, with one `rs_exposure` event; a well-formed tag the game sets is left alone.
+- The saved queue moved to `ravensight/queue-<hash>.json`, format version 2, written whenever it changes instead of only at quit. The 0.5 file is read once and removed.
+- A refused key or the kill switch keeps the queued events on disk for the next launch.
+- Backoff waits are multiplied by a random factor from 0.5 up to 1 (was plus or minus 20 percent). A batch 401 opens a new session once, then waits.
+- A 400 that is not about one event drops that request's events instead of halving.
+
+### Added
+
+- Each session's `origin` is saved with its events and sent on every event a later session delivers.
+- gzip for request bodies of 1,024 bytes or more; a 415, or a 413 for one compressed event, is resent uncompressed once (a 413 for one uncompressed event is dropped, as in 0.6.0).
+- Request signing when the session answer has `signing`, with HMAC-SHA256 in `ravensight/hmac.lua` (LÖVE's `love.data.hash` where available) and the clock corrected by `serverTime`.
+- The saved queue keeps 0.6.0's rules (automatic errors evicted first and queued behind gameplay, a 413 split like a 400); its saved crashes older than 30 days are still deleted unsent, and held boot errors keep their crash time in milliseconds.
+- The local 8 KB check counts an error event's `rs_message`, `rs_stack` and `rs_trail` (within 200, 2,000 and 1,500 characters) one byte a character, as the server does.
+- A 400 with `index` drops only that event; `batch_too_large` and 413 halve; a 503 with Retry-After waits like a 429; `flush()` cuts a backoff wait but never a Retry-After.
+- `trackAd`, `trackAdRevenue`, `microsFromDecimalString`, `microsFromRevenue`, `setAttribution` (once per install) and `getDeliveryStats`.
+- The GPU name on the session (`device.gpu`).
+- The love.js bridge passes the first config read after each answer to the page SDK's `getConfig`.
+
+### Changed
+
 - Event timestamps are unix milliseconds on native builds, so events in one
   second keep their order in funnels and sessions. `os.time` has no fraction,
   so the clock is the wall clock lined up with `love.timer`; it can read up to

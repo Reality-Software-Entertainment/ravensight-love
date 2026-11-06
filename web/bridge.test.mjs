@@ -557,3 +557,16 @@ test('config bridge drops pending replies when the player opts out', async () =>
   finish({ source: 'network', values: { speed: 3 } });
   await new Promise(resolve => setImmediate(resolve)); assert.equal(written.length, 0);
 });
+
+test('config_read is passed to the SDK getConfig, so the page counts the exposure', () => {
+  const { rs, calls } = fakeRs();
+  rs.getConfig = (...a) => { calls.push(['getConfig', ...a]); return null; };
+  const { Module, printed } = fakeModule();
+  installRavensightBridge(rs, Module);
+  Module.print(line({ v: 1, op: 'config_read', key: 'speed' }));
+  Module.print(line({ v: 1, op: 'config_read', key: 7 }));
+  Module.print(line({ v: 1, op: 'enabled', value: false }));
+  Module.print(line({ v: 1, op: 'config_read', key: 'speed' }));
+  assert.deepEqual(calls, [['getConfig', 'speed', null], ['setEnabled', false]]);
+  assert.deepEqual(printed, []);
+});

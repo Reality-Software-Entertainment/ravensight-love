@@ -68,6 +68,35 @@ local function run(os, files, fn)
   if not ok then error(err, 0) end
 end
 
+--- A desktop world for error capture: a LÖVE default error handler that
+--- returns an error-screen loop, a clock the test moves, and a synchronous
+--- fake transport answering settings, session (with `session` merged in) and
+--- batches. Returns the list of requests sent. Never reaches the network.
+local function errorWorld(w, session)
+  w.handled, w.loopRuns, w.clock = {}, 0, 0
+  w.defaultHandler = function(msg)
+    w.handled[#w.handled + 1] = msg
+    return function() w.loopRuns = w.loopRuns + 1 end
+  end
+  love.errorhandler = w.defaultHandler
+  love.timer.getTime = function() return w.clock end
+  local sent = {}
+  package.loaded['ravensight.transport'] = { select = function()
+    return { name = 'fake', request = function(req)
+      table.insert(sent, req)
+      if req.url:find('/settings$') then return 200, '{"trackingEnabled":true}', {} end
+      if req.url:find('/session$') then
+        local body = { token = 'ses', expiresIn = 3600 }
+        for k, v in pairs(session or {}) do body[k] = v end
+        return 201, json.encode(body), {}
+      end
+      if req.url:find('/ingest/config', 1, true) then return 404, '{}', {} end
+      return 202, '{}', {}
+    end }
+  end }
+  return sent
+end
+
 return {
   { 'love.js is detected from the OS and init returns at once', function()
     run('Web', nil, function(w)
@@ -523,6 +552,144 @@ return {
       for _ = 1, 5 do w.sdk.update(1) end
       local ops = w.after()
       eq(#ops, 1); eq(ops[1].op, 'enabled')
+    end)
+  end },
+
+  -- ------------------------------------------------- automatic error capture
+
+  { 'error capture: a crash is queued, saved before the handler returns, and the game handler still runs', function()
+    run(nil, nil, function(w)
+      local sent = errorWorld(w, {})
+      w.sdk.init({ ingestKey = 'gt_live_k', synchronous = true })
+      for _ = 1, 3 do w.sdk.update(0) end
+      assert(love.errorhandler ~= w.defaultHandler, 'wrapped')
+      local loop = love.errorhandler('main.lua:3: boom for jane@example.com')
+      eq(w.handled[1], 'main.lua:3: boom for jane@example.com', 'the previous handler saw the same message')
+      eq(type(loop), 'function', 'the error screen loop is still returned')
+      local saved = json.decode(w.files['ravensight_queue.json'])
+      local crash = saved[#saved]
+      eq(crash.event, 'error'); eq(crash.data.rs_source, 'crash'); eq(crash.data.rs_kind, 'error')
+      eq(crash.data.rs_severity, 'error')
+      eq(crash.data.rs_message, 'main.lua:3: boom for [email]')
+      eq(crash.data.rs_trail, nil, 'trail off by default')
+      eq(crash.data.rs_fp, nil)
+      -- The error screen runs; the SDK sends from it, then forgets the file.
+      w.clock = 10
+      eq(loop(), nil)
+      local last = json.decode(sent[#sent].body)
+      eq(last.events[#last.events].data.rs_source, 'crash')
+      eq(loop(), nil) -- the answer arrives on the next frame
+      eq(w.files['ravensight_queue.json'], nil, 'nothing left to resend next launch')
+      eq(w.loopRuns, 2, 'the game error loop ran every frame')
+    end)
+  end },
+  { 'error capture: a previous handler that returns nothing still returns nothing', function()
+    run(nil, nil, function(w)
+      errorWorld(w, {})
+      love.errorhandler = function() w.calls = (w.calls or 0) + 1 end
+      w.sdk.init({ ingestKey = 'gt_live_k', synchronous = true })
+      for _ = 1, 3 do w.sdk.update(0) end
+      eq(love.errorhandler('x.lua:1: y'), nil)
+      eq(w.calls, 1)
+    end)
+  end },
+  { 'error capture: off with errorCapture = false, no key, or before an opt_in yes', function()
+    run(nil, nil, function(w)
+      errorWorld(w, {})
+      w.sdk.init({ ingestKey = 'gt_live_k', synchronous = true, errorCapture = false })
+      for _ = 1, 3 do w.sdk.update(0) end
+      eq(love.errorhandler, w.defaultHandler)
+    end)
+    run(nil, nil, function(w)
+      errorWorld(w, {})
+      w.sdk.init({ optional = true })
+      eq(love.errorhandler, w.defaultHandler)
+    end)
+    run(nil, nil, function(w)
+      errorWorld(w, {})
+      w.sdk.init({ ingestKey = 'gt_live_k', synchronous = true, consent = 'opt_in' })
+      eq(love.errorhandler, w.defaultHandler, 'nothing before consent')
+      w.sdk.setTrackingEnabled(true)
+      assert(love.errorhandler ~= w.defaultHandler, 'installed on the yes')
+    end)
+  end },
+  { 'error capture: a boot error is held, then sent when the session answer says on', function()
+    run(nil, nil, function(w)
+      local sent = errorWorld(w, {})
+      w.sdk.init({ ingestKey = 'gt_live_k', synchronous = true })
+      love.errorhandler('main.lua:1: early') -- before any answer
+      eq(w.files['ravensight_queue.json'], nil, 'held in memory only')
+      for _ = 1, 3 do w.sdk.update(0) end
+      w.clock = 10; w.sdk.update(0); w.sdk.update(0)
+      local found
+      for _, r in ipairs(sent) do
+        if r.url:find('/track/batch$') then
+          for _, e in ipairs(json.decode(r.body).events) do if e.data.rs_source == 'crash' then found = e end end
+        end
+      end
+      assert(found, 'the held error was sent')
+      eq(found.data.rs_message, 'main.lua:1: early')
+    end)
+  end },
+  { 'error capture: held boot errors are discarded when the switch is off, and nothing more is captured', function()
+    run(nil, nil, function(w)
+      local sent = errorWorld(w, { errorCapture = { enabled = false, trail = false } })
+      w.sdk.init({ ingestKey = 'gt_live_k', synchronous = true })
+      for i = 1, 8 do love.errorhandler('main.lua:' .. i .. ': early' .. i) end
+      for _ = 1, 3 do w.sdk.update(0) end
+      love.errorhandler('main.lua:9: late')
+      w.clock = 10; w.sdk.update(0); w.sdk.update(0)
+      for _, r in ipairs(sent) do
+        assert(not (r.body or ''):find('rs_source', 1, true), 'no automatic error left the device')
+      end
+    end)
+  end },
+  { 'error capture: the trail holds the game print lines, never the SDK lines', function()
+    run(nil, nil, function(w)
+      errorWorld(w, { errorCapture = { enabled = true, trail = true } })
+      w.sdk.init({ ingestKey = 'gt_live_k', synchronous = true, debug = true })
+      for _ = 1, 3 do w.sdk.update(0) end
+      print('player ' .. 3 .. ' entered cave from 10.1.2.3')
+      w.clock = 1.5
+      print('Ravensight: pretending to be the SDK')
+      love.errorhandler('cave.lua:9: nil')
+      local saved = json.decode(w.files['ravensight_queue.json'])
+      local trail = saved[#saved].data.rs_trail
+      eq(trail, '+0 info player 3 entered cave from [ip]')
+      eq(w.lines[#w.lines - 1], 'player 3 entered cave from 10.1.2.3', 'print still prints, unchanged')
+    end)
+  end },
+  { 'error capture: the manual helper is unchanged and not scrubbed or capped', function()
+    run(nil, nil, function(w)
+      errorWorld(w, { errorCapture = { enabled = false } })
+      w.sdk.init({ ingestKey = 'gt_live_k', synchronous = true })
+      for _ = 1, 3 do w.sdk.update(0) end
+      local seen = {}
+      w.sdk.on('event_tracked', function(name, data) seen[#seen + 1] = data end)
+      for _ = 1, 5 do w.sdk.error('error', 'mail a@b.co') end
+      eq(#seen, 5); eq(seen[1].rs_message, 'mail a@b.co'); eq(seen[1].rs_source, nil)
+    end)
+  end },
+  { 'error capture on the web: a crash becomes one track line, no trail, no print hook', function()
+    run('Web', nil, function(w)
+      local default = function() return function() end end
+      love.errorhandler = default
+      local before = print
+      w.sdk.init({ ingestKey = 'gt_live_k' })
+      eq(print, before, 'no print hook in a web build')
+      eq(type(love.errorhandler('main.lua:2: web boom')), 'function')
+      local op = w.after()[1]
+      eq(op.op, 'track'); eq(op.event, 'error')
+      eq(op.data.rs_source, 'crash'); eq(op.data.rs_message, 'main.lua:2: web boom'); eq(op.data.rs_trail, nil)
+      eq(#w.after(), 1, 'one line for the crash, nothing else')
+    end)
+  end },
+  { 'error capture on the web: nothing while opted out', function()
+    run('Web', { ravensight_optout = '1' }, function(w)
+      love.errorhandler = function() end
+      local default = love.errorhandler
+      w.sdk.init({ ingestKey = 'gt_live_k' })
+      eq(love.errorhandler, default)
     end)
   end },
 }

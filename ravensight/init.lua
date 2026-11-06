@@ -27,6 +27,7 @@ if modulePrefix == '.' then modulePrefix = '' end
 local Core = require(modulePrefix .. 'core')
 local json = require(modulePrefix .. 'json')
 local Typed = require(modulePrefix .. 'typed')
+local Errors = require(modulePrefix .. 'errors')
 
 local ravensight = { VERSION = Core.VERSION }
 
@@ -43,10 +44,20 @@ local transportName
 local warnedNoTransport = false
 local holdingQuit = false
 local health        -- the performance sampler, only with performance = true
+local capture       -- automatic error capture (ravensight/errors.lua), once installed
+local held = {}     -- boot errors captured before the first session answer
+local MAX_HELD = 5
+local sdkPrinting = false -- true while the SDK prints its own line
+
+local SDK_LINE = 'Ravensight: '
+local WEB_TAG = '__RAVENSIGHT__ '
 
 local function log(level, message)
   if level == 'info' and not (config and config.debug) then return end
-  print('Ravensight: ' .. message)
+  sdkPrinting = true
+  local ok, err = pcall(print, SDK_LINE .. message)
+  sdkPrinting = false
+  if not ok then error(err, 0) end
 end
 
 -- -------------------------------------------------------------- platform
@@ -211,6 +222,129 @@ local function startNetwork()
   end
 end
 
+-- ------------------------------------------------------- error capture
+--
+-- Installed once, and only when everything allows it: a key (or the web
+-- bridge), the player's consent and the errorCapture option not false.
+-- Fetching settings installs nothing. Errors captured before the first
+-- session answer (boot errors) are held in memory, at most 5; the answer
+-- sends them when its errorCapture.enabled is not false and discards them
+-- unsent otherwise. Every hook chains to what was there before; a failure
+-- inside capture is dropped silently.
+
+--- The words print would write for these arguments, tab separated.
+local function printed(...)
+  local parts = {}
+  for i = 1, select('#', ...) do parts[i] = tostring((select(i, ...))) end
+  return table.concat(parts, '\t')
+end
+
+--- The desktop crash, queued behind gameplay and saved to the save
+--- directory at once, so the next launch sends it if this process dies
+--- before the flush is answered.
+local function captureCrash(msg, stack)
+  if not capture or not core then return end
+  if transportName == 'web' then
+    if not core.trackingEnabled then return end
+    local data = capture:capture({ source = 'crash', severity = 'error', message = tostring(msg), stack = stack })
+    if data then core:track('error', data) end
+    return
+  end
+  if not core.trackingEnabled then return end
+  if not core.sessionAnswered then
+    -- A boot error: the switch is not known yet. Held in memory only.
+    if #held >= MAX_HELD then return end
+    local data = capture:capture({ source = 'crash', severity = 'error', message = tostring(msg), stack = stack, trail = true })
+    if data then held[#held + 1] = data end
+    return
+  end
+  if not core:errorCaptureAllowed() then return end
+  local data = capture:capture({
+    source = 'crash', severity = 'error', message = tostring(msg), stack = stack,
+    trail = core.errorTrailEnabled,
+  })
+  if not data or not core:enqueueError('error', data) then return end
+  core:saveQueue()
+  -- With the worker thread this only hands the batch over; the synchronous
+  -- transport would block the error screen, so it waits for the next launch.
+  if requestChannel then core:flush() end
+end
+
+--- On a session answer: held boot errors are sent when capture is on, and
+--- discarded unsent when it is off. The trail goes only with the trail on.
+local function releaseHeld()
+  if #held == 0 or not core then return end
+  local list = held
+  held = {}
+  if not core:errorCaptureAllowed() then return end
+  for _, data in ipairs(list) do
+    if not core.errorTrailEnabled then data.rs_trail = nil end
+    core:enqueueError('error', data)
+  end
+  core:saveQueue()
+end
+
+local afterCrashSaved
+--- Runs while the error screen shows: delivers answers and keeps the saved
+--- queue in step, so a crash that was sent is not sent again next launch.
+local function pumpAfterCrash()
+  pollResponses()
+  core:update()
+  if #core.pending ~= afterCrashSaved then
+    afterCrashSaved = #core.pending
+    core:saveQueue()
+  end
+end
+
+local function installErrorHandler()
+  if not love then return end
+  local previous = love.errorhandler or love.errhand
+  if type(previous) ~= 'function' then return end
+  love.errorhandler = function(msg, ...)
+    local stack = Errors.stackOf(debug.traceback('', 2))
+    pcall(captureCrash, msg, stack)
+    afterCrashSaved = core and core.pending and #core.pending or 0
+    local loop = previous(msg, ...)
+    if type(loop) ~= 'function' or transportName == 'web' or not core then return loop end
+    return function(...)
+      pcall(pumpAfterCrash)
+      local result = loop(...)
+      if result ~= nil then pcall(core.saveQueue, core) end
+      return result
+    end
+  end
+end
+
+local function recordPrint(...)
+  if transportName == 'web' or not core.trackingEnabled then return end
+  -- Before the session answer the switch is unknown: the ring (memory only)
+  -- keeps the lines, and they leave only if the answer turns the trail on.
+  if core.sessionAnswered and not (core.errorTrailEnabled and core:errorCaptureAllowed()) then return end
+  local line = printed(...)
+  if line:sub(1, #SDK_LINE) == SDK_LINE or line:sub(1, #WEB_TAG) == WEB_TAG then return end
+  capture:record('info', line)
+end
+
+local function installPrintHook()
+  local previous = print
+  if type(previous) ~= 'function' then return end
+  _G.print = function(...)
+    if not sdkPrinting and capture and core then pcall(recordPrint, ...) end
+    return previous(...)
+  end
+end
+
+--- Installs capture once, when the gate allows it.
+local function installCapture()
+  if capture or not config or config.errorCapture == false or not core then return end
+  if not core.trackingEnabled or core.keyRefused then return end
+  capture = Errors.new({ now = love.timer and love.timer.getTime or os.clock })
+  installErrorHandler()
+  -- The web build has no trail: the page's SDK owns the session answer, so
+  -- the Lua side never learns the trail switch.
+  if transportName ~= 'web' then installPrintHook() end
+end
+
 -- ------------------------------------------------------------- public API
 
 --- Starts the SDK. Call once, from love.load().
@@ -239,6 +373,8 @@ end
 ---   performance   sample the frame rate once a second and send one `health`
 ---                 event per session, on quit (desktop) or before the page
 ---                 hides (web), default false. See "Typed events" in the README.
+---   errorCapture  false turns automatic error capture off for this build,
+---                 default true. See "Error capture" in the README.
 ---
 --- Returns nothing on the desktop. In a web build it returns
 --- { sessionReady = false, reason = 'web_bridge' }, since the page's
@@ -268,6 +404,7 @@ function ravensight.init(options)
     consent = Core.normalizeConsent(options.consent),
     distribution = options.distribution,
     performance = options.performance == true,
+    errorCapture = options.errorCapture ~= false,
   }
   -- Switched off by the game: no session, no queue, every call a no-op.
   if not config.enabled then
@@ -281,6 +418,7 @@ function ravensight.init(options)
     })
     transportName = 'web'
     core:start()
+    installCapture()
     if config.performance then health = Typed.Health.new({ random = love.math and love.math.random or math.random }) end
     return { sessionReady = false, reason = 'web_bridge' }
   end
@@ -314,7 +452,11 @@ function ravensight.init(options)
     random = love.math and love.math.random or math.random,
   })
   startNetwork()
+  -- The session answer carries the game's switch: it releases or discards
+  -- the boot errors held until then.
+  core:on('session_ready', function() pcall(releaseHeld) end)
   core:start()
+  installCapture()
   if config.performance then
     health = Typed.Health.new({
       random = love.math and love.math.random or math.random,
@@ -470,6 +612,7 @@ end
 function ravensight.setTrackingEnabled(enabled)
   if core then
     core:setTrackingEnabled(enabled)
+    if enabled then installCapture() else held = {} end
   elseif initialized then
     Core.saveChoice(storage, config.consent, enabled and true or false)
   end

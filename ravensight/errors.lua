@@ -17,7 +17,8 @@
 --   1. a URL loses its query, its fragment and any user:password@
 --   2. Bearer tokens, JWT-shaped strings and gt_ keys become [token]
 --   3. an email address becomes [email]
---   4. /Users/<name>, /home/<name> and C:\Users\<name> become ~
+--   4. /Users/<name>, /home/<name>, C:\Users\<name> and
+--      C:\Documents and Settings\<name> become ~ (the whole name)
 --   5. IPv4 and IPv6 addresses become [ip]
 --   6. a run of 32 or more characters from [A-Za-z0-9+/=_-] that contains
 --      at least one digit becomes [token], unless it has a / and every /
@@ -152,9 +153,13 @@ function Errors.scrub(text)
   text = text:gsub('%f[%w_]eyJ[%w_%-]+%.[%w_%-]+%.[%w_%-]*', '[token]')
   text = text:gsub('%f[%w_]gt_[%w_]+', '[token]')
   text = text:gsub('[%w%._%%%+%-]+@[%w%.%-]+%.%a%a+', '[email]')
-  text = text:gsub('%f[%w_]%a:[\\/]' .. ci('users') .. '[\\/][^\\/%s\'"]+', '~')
-  text = text:gsub('/Users/[^/%s\'"]+', '~')
-  text = text:gsub('/home/[^/%s\'"]+', '~')
+  -- A home folder is the whole segment up to the next slash, quote, <, >,
+  -- ':' or end of line, spaces included (contract 5): a name can be Jo Ann.
+  local name = '[^\\/\'"<>:\r\n]+'
+  text = text:gsub('%f[%w_]%a:[\\/]' .. ci('users') .. '[\\/]' .. name, '~')
+  text = text:gsub('%f[%w_]%a:[\\/]' .. ci('documents and settings') .. '[\\/]' .. name, '~')
+  text = text:gsub('/Users/' .. name, '~')
+  text = text:gsub('/home/' .. name, '~')
   text = text:gsub('%f[%w_]%d+%.%d+%.%d+%.%d+%f[^%w_]', ipv4)
   text = text:gsub('%f[%w_:][%x:]*:[%x:]*%f[^%w_:]', ipv6)
   text = text:gsub('[%w%+/=_%-]+', tokenRun)

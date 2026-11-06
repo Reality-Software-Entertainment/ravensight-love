@@ -456,8 +456,9 @@ scrubbed: emails become `[email]`; bearer tokens, JWT-shaped strings, `gt_`
 keys and runs of 32 or more letters, digits, `+`, `/`, `=`, `_` or `-` with
 a digit become `[token]`, unless the run is a file path whose every piece is
 an ordinary path word, so paths keep their files and secrets with slashes do
-not; IP addresses become `[ip]`; `/Users/<name>`, `/home/<name>` and
-`C:\Users\<name>` become `~`; a URL loses its query and fragment.
+not; IP addresses become `[ip]`; `/Users/<name>`, `/home/<name>`,
+`C:\Users\<name>` and `C:\Documents and Settings\<name>` become `~`, the
+whole name, spaces included; a URL loses its query and fragment.
 
 **It survives the crash.** The crash is written to the save folder (the same
 `ravensight_queue.json` used on quit) before your handler runs. While the

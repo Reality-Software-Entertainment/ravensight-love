@@ -16,6 +16,8 @@
   discarded if it says off.
 - Device limits per launch: 30 captures, 3 per error, 10 trails, 6 a minute.
   Message, stack and trail are scrubbed on the device by the platform's rules.
+- A home folder scrubs as the whole name, spaces included, and
+  `C:\Documents and Settings\<name>` is a home folder (scrub contract 5).
 - An optional trail of the last 20 printed lines, only when the game's trail
   switch is on; the SDK's own lines are never in it.
 - Gameplay events stay ahead of captured errors in the queue, and errors are

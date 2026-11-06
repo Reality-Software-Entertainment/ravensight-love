@@ -3,6 +3,7 @@
 -- own scrub (src/services/errorScrub.js) on the same inputs.
 
 local Errors = require('ravensight.errors')
+local json = require('ravensight.json')
 
 local function eq(a, b, msg) assert(a == b, (msg or '') .. ' expected ' .. tostring(b) .. ', got ' .. tostring(a)) end
 
@@ -53,14 +54,21 @@ return {
     eq(Errors.scrub(string.rep('a', 31) .. '1'), '[token]')
     eq(Errors.scrub(string.rep('a', 30) .. '1'), string.rep('a', 30) .. '1')
   end },
-  { 'a long file path with a digit keeps its file: / is not in the token run', function()
+  { 'the shared contract vectors (spec/scrub-vectors.json), every case', function()
+    local f = assert(io.open('spec/scrub-vectors.json', 'r'))
+    local fixture = json.decode(f:read('*a'))
+    f:close()
+    assert(#fixture.cases > 0)
+    for _, case in ipairs(fixture.cases) do
+      eq(Errors.scrub(case['in']), case.out, case.name)
+      eq(Errors.scrub(case.out), case.out, case.name .. ' (idempotent)')
+    end
+  end },
+  { 'a path keeps its file, a secret with slashes does not', function()
     local path = 'res://addons/inventory_system2/ui/inventory_slot.gd:12'
     eq(Errors.scrub(path), path)
-    local deep = 'game/levels/world_2_the_frozen_caverns/boss_room_3/phase_2.lua:40: x'
-    assert(#deep > 32)
-    eq(Errors.scrub(deep), deep)
-    -- One piece of 32 or more with a digit is still a token, path or not.
-    eq(Errors.scrub('a/' .. string.rep('b', 31) .. '1/c.lua'), 'a/[token]/c.lua')
+    eq(Errors.scrub('aws wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY1 leaked'), 'aws [token] leaked')
+    eq(Errors.scrub('a/' .. string.rep('b', 31) .. '1/c.lua'), '[token].lua', 'a piece of 32 is not a path word')
     eq(Errors.scrub('k=' .. string.rep('a', 30) .. '1=='), '[token]', '= is in the run class')
   end },
   { 'the template takes out numbers, hex, ids, urls and quoted text', function()

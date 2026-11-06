@@ -453,8 +453,10 @@ so a printed line is never captured as an error by itself.
 `rs_severity = "error"`, `rs_message` (the error, at most 200 characters)
 and `rs_stack` (the Lua traceback, at most 2,000). Before queueing, both are
 scrubbed: emails become `[email]`; bearer tokens, JWT-shaped strings, `gt_`
-keys and runs of 32 or more letters, digits, `+`, `=`, `_` or `-` with a
-digit become `[token]` (a `/` ends a run, so file paths keep their files); IP addresses become `[ip]`; `/Users/<name>`, `/home/<name>` and
+keys and runs of 32 or more letters, digits, `+`, `/`, `=`, `_` or `-` with
+a digit become `[token]`, unless the run is a file path whose every piece is
+an ordinary path word, so paths keep their files and secrets with slashes do
+not; IP addresses become `[ip]`; `/Users/<name>`, `/home/<name>` and
 `C:\Users\<name>` become `~`; a URL loses its query and fragment.
 
 **It survives the crash.** The crash is written to the save folder (the same

@@ -19,9 +19,11 @@
 --   3. an email address becomes [email]
 --   4. /Users/<name>, /home/<name> and C:\Users\<name> become ~
 --   5. IPv4 and IPv6 addresses become [ip]
---   6. a run of 32 or more characters from [A-Za-z0-9+=_-] that contains at
---      least one digit becomes [token]; long snake_case names in a stack
---      stay, and / is not in the class, so file paths stay too
+--   6. a run of 32 or more characters from [A-Za-z0-9+/=_-] that contains
+--      at least one digit becomes [token], unless it has a / and every /
+--      piece is empty or a path word under 32 characters (lowercase words
+--      joined by _ or -, CamelCase, or a capital or digit acronym of 1 to
+--      6), so file paths stay and secrets with slashes do not
 --
 -- MIT licensed, part of ravensight-love.
 
@@ -92,8 +94,43 @@ local function ipv6(match)
   return '[ip]'
 end
 
+-- A path word: lowercase words and digits joined by single _ or -.
+local function lowerWord(p)
+  if not p:match('^[%l%d_%-]+$') or p:match('^[_%-]') or p:match('[_%-]$') or p:match('[_%-][_%-]') then return false end
+  return true
+end
+
+-- A path word: CamelCase, a capital then lowercase or digits, and every later
+-- capital followed by at least one lowercase letter or digit.
+local function camelWord(p)
+  local first = p:match('^%u[%l%d]*')
+  if not first then return false end
+  local i = #first + 1
+  while i <= #p do
+    local chunk = p:match('^%u[%l%d]+', i)
+    if not chunk then return false end
+    i = i + #chunk
+  end
+  return true
+end
+
+local function pathPiece(p)
+  if #p >= 32 then return false end
+  return p == '' or lowerWord(p) or camelWord(p) or (#p <= 6 and p:match('^[%u%d]+$') ~= nil)
+end
+
+-- A run with a / is kept only when every piece is a path word, so a file
+-- path survives and a secret with slashes in it does not.
+local function isPath(run)
+  if not run:find('/', 1, true) then return false end
+  for piece in (run .. '/'):gmatch('([^/]*)/') do
+    if not pathPiece(piece) then return false end
+  end
+  return true
+end
+
 local function tokenRun(run)
-  if #run < 32 or not run:find('%d') then return run end
+  if #run < 32 or not run:find('%d') or isPath(run) then return run end
   return '[token]'
 end
 
@@ -110,7 +147,7 @@ function Errors.scrub(text)
   text = text:gsub('/home/[^/%s\'"]+', '~')
   text = text:gsub('%f[%w_]%d+%.%d+%.%d+%.%d+%f[^%w_]', ipv4)
   text = text:gsub('%f[%w_:][%x:]*:[%x:]*%f[^%w_:]', ipv6)
-  text = text:gsub('[%w%+=_%-]+', tokenRun)
+  text = text:gsub('[%w%+/=_%-]+', tokenRun)
   return text
 end
 

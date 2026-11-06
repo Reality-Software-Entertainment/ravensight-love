@@ -669,7 +669,8 @@ return {
       local sent = errorWorld(w, {})
       w.sdk.init({ ingestKey = 'gt_live_k', synchronous = true })
       love.errorhandler('main.lua:1: early') -- before any answer
-      eq(w.files['ravensight_queue.json'], nil, 'held in memory only')
+      eq(w.files['ravensight_queue.json'], nil, 'not in the queue before the answer')
+      assert(w.files['ravensight_crash.json'], 'in the crash file')
       for _ = 1, 3 do w.sdk.update(0) end
       w.clock = 10; w.sdk.update(0); w.sdk.update(0)
       local found
@@ -680,6 +681,71 @@ return {
       end
       assert(found, 'the held error was sent')
       eq(found.data.rs_message, 'main.lua:1: early')
+    end)
+  end },
+  { 'error capture: a sync-transport crash before the answer is saved, and the next launch sends it once the answer says on', function()
+    local files = {}
+    run(nil, files, function(w)
+      local sent = errorWorld(w, { errorCapture = { enabled = true, trail = true } })
+      w.sdk.init({ ingestKey = 'gt_live_k', synchronous = true })
+      print('loading level 1')
+      local before = #sent -- the settings check init already made
+      local loop = love.errorhandler('main.lua:4: crash in love.load')
+      local saved = json.decode(files['ravensight_crash.json'])
+      eq(#saved, 1, 'in the crash file before the handler returned')
+      eq(saved[1].data.rs_source, 'crash'); eq(saved[1].data.rs_severity, 'critical')
+      eq(saved[1].data.rs_trail, nil, 'no trail: the switch was not known')
+      for _ = 1, 3 do loop() end
+      eq(#sent, before, 'nothing sent from the handler or the error screen')
+    end)
+    local crashedAt = json.decode(files['ravensight_crash.json'])[1].timestamp
+    run(nil, files, function(w)
+      local sent = errorWorld(w, {})
+      w.sdk.init({ ingestKey = 'gt_live_k', synchronous = true })
+      for _ = 1, 3 do w.sdk.update(0) end
+      w.clock = 10; w.sdk.update(0); w.sdk.update(0)
+      local found
+      for _, r in ipairs(sent) do
+        if r.url:find('/track/batch$') then
+          for _, e in ipairs(json.decode(r.body).events) do if e.data.rs_source == 'crash' then found = e end end
+        end
+      end
+      assert(found, 'the saved crash was sent on the next launch')
+      eq(found.data.rs_message, 'main.lua:4: crash in love.load')
+      eq(found.timestamp, crashedAt, 'with the time of the crash')
+      eq(files['ravensight_crash.json'], nil, 'the crash file is gone')
+    end)
+  end },
+  { 'error capture: a saved crash is discarded unsent when the next answer says off', function()
+    local files = {}
+    run(nil, files, function(w)
+      errorWorld(w, {})
+      w.sdk.init({ ingestKey = 'gt_live_k', synchronous = true })
+      love.errorhandler('main.lua:4: crash')
+    end)
+    assert(files['ravensight_crash.json'])
+    run(nil, files, function(w)
+      local sent = errorWorld(w, { errorCapture = { enabled = false } })
+      w.sdk.init({ ingestKey = 'gt_live_k', synchronous = true })
+      for _ = 1, 3 do w.sdk.update(0) end
+      w.clock = 10; w.sdk.update(0); w.sdk.update(0)
+      for _, r in ipairs(sent) do assert(not (r.body or ''):find('rs_source', 1, true), 'not sent') end
+      eq(files['ravensight_crash.json'], nil, 'discarded')
+    end)
+  end },
+  { 'error capture: an opt-out or errorCapture = false removes a saved crash', function()
+    local files = { ['ravensight_crash.json'] = '[{"data":{"rs_kind":"error","rs_source":"crash"},"timestamp":1}]' }
+    run(nil, files, function(w)
+      errorWorld(w, {})
+      w.sdk.init({ ingestKey = 'gt_live_k', synchronous = true })
+      w.sdk.setTrackingEnabled(false)
+      eq(files['ravensight_crash.json'], nil)
+    end)
+    files['ravensight_crash.json'] = '[{"data":{"rs_kind":"error","rs_source":"crash"},"timestamp":1}]'
+    run(nil, files, function(w)
+      errorWorld(w, {})
+      w.sdk.init({ ingestKey = 'gt_live_k', synchronous = true, errorCapture = false })
+      eq(files['ravensight_crash.json'], nil)
     end)
   end },
   { 'error capture: held boot errors are discarded when the switch is off, and nothing more is captured', function()

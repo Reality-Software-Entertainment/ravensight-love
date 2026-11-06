@@ -11,8 +11,9 @@
   open the SDK keeps sending from its background thread (never with
   `synchronous = true`, which would freeze the error screen).
 - Only with a key and consent; the session answer's `errorCapture.enabled`
-  decides. Errors before that answer are held in memory, at most 5, then sent
-  or discarded.
+  decides. A crash before that answer is saved (at most 5, no trail) and
+  sent once an answer, this launch or the next, says capture is on, or
+  discarded if it says off.
 - Device limits per launch: 30 captures, 3 per error, 10 trails, 6 a minute.
   Message, stack and trail are scrubbed on the device by the platform's rules.
 - An optional trail of the last 20 printed lines, only when the game's trail

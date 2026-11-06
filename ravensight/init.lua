@@ -47,6 +47,9 @@ local health        -- the performance sampler, only with performance = true
 local capture       -- automatic error capture (ravensight/errors.lua), once installed
 local held = {}     -- boot errors captured before the first session answer
 local MAX_HELD = 5
+--- Crashes captured before the session answer, saved so the next launch can
+--- send them once its answer says capture is on, or discard them if off.
+local CRASH_FILE = 'ravensight_crash.json'
 local sdkPrinting = false -- true while the SDK prints its own line
 
 local SDK_LINE = 'Ravensight: '
@@ -252,10 +255,14 @@ local function captureCrash(msg, stack)
   end
   if not core.trackingEnabled then return end
   if not core.sessionAnswered then
-    -- A boot error: the switch is not known yet. Held in memory only.
+    -- A crash before the session answer: the switch is not known, so no
+    -- trail. Held, and saved to the crash file before the handler returns
+    -- (never in a playtest run, whose events are never carried over).
     if #held >= MAX_HELD then return end
-    local data = capture:capture({ source = 'crash', severity = 'critical', message = tostring(msg), stack = stack, trail = 'held' })
-    if data then held[#held + 1] = data end
+    local data = capture:capture({ source = 'crash', severity = 'critical', message = tostring(msg), stack = stack })
+    if not data then return end
+    held[#held + 1] = { data = data, timestamp = os.time() }
+    if core.playtestToken == '' then storage.write(CRASH_FILE, json.encode(held)) end
     return
   end
   if not core:errorCaptureAllowed() then return end
@@ -276,13 +283,37 @@ local function releaseHeld()
   if #held == 0 or not core then return end
   local list = held
   held = {}
-  if not core:errorCaptureAllowed() then return end
-  for _, data in ipairs(list) do
-    -- A held trail counts against the 10 only when it is actually sent.
-    if data.rs_trail and not (core.errorTrailEnabled and capture:claimTrail()) then data.rs_trail = nil end
-    core:enqueueError('error', data)
+  if core:errorCaptureAllowed() then
+    for _, entry in ipairs(list) do
+      local queued = core:enqueueError('error', entry.data)
+      -- Keep the time of the crash, not of this send.
+      if queued and type(entry.timestamp) == 'number' then
+        for _, e in ipairs(core.pending) do
+          if e.data == queued then e.timestamp = entry.timestamp end
+        end
+      end
+    end
+    core:saveQueue()
   end
-  core:saveQueue()
+  -- Sent (now in the saved queue) or discarded: either way the file goes.
+  storage.remove(CRASH_FILE)
+end
+
+--- A crash file from an earlier launch: held until this launch's answer.
+local function loadCrashFile()
+  local ok, text = pcall(storage.read, CRASH_FILE)
+  local saved = ok and type(text) == 'string' and #text <= 65536 and json.decode(text) or nil
+  if type(saved) ~= 'table' then
+    if text then storage.remove(CRASH_FILE) end
+    return
+  end
+  for _, entry in ipairs(saved) do
+    if #held >= MAX_HELD then break end
+    if type(entry) == 'table' and type(entry.data) == 'table' and Errors.isAutomatic(entry.data) then
+      entry.data.rs_trail = nil
+      held[#held + 1] = { data = entry.data, timestamp = entry.timestamp }
+    end
+  end
 end
 
 local afterCrashSaved
@@ -339,9 +370,14 @@ end
 
 --- Installs capture once, when the gate allows it.
 local function installCapture()
-  if capture or not config or config.errorCapture == false or not core then return end
+  if capture or not config or not core then return end
+  if config.errorCapture == false then
+    if transportName ~= 'web' then storage.remove(CRASH_FILE) end
+    return
+  end
   if not core.trackingEnabled or core.keyRefused then return end
   capture = Errors.new({ now = love.timer and love.timer.getTime or os.clock })
+  if transportName ~= 'web' and core.playtestToken == '' then loadCrashFile() end
   installErrorHandler()
   -- The web build has no trail: the page's SDK owns the session answer, so
   -- the Lua side never learns the trail switch.
@@ -615,7 +651,12 @@ end
 function ravensight.setTrackingEnabled(enabled)
   if core then
     core:setTrackingEnabled(enabled)
-    if enabled then installCapture() else held = {} end
+    if enabled then
+      installCapture()
+    else
+      held = {}
+      if transportName ~= 'web' then storage.remove(CRASH_FILE) end
+    end
   elseif initialized then
     Core.saveChoice(storage, config.consent, enabled and true or false)
   end
@@ -645,6 +686,8 @@ function ravensight.resetDeviceId()
     return
   end
   core:resetDeviceId()
+  held = {}
+  storage.remove(CRASH_FILE)
 end
 
 --- This install's random device id. nil in a web build, where the page's

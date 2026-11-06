@@ -470,10 +470,12 @@ saved crash goes on the next launch.
 **When it is on.** Only with a key, after the player's consent (with
 `consent = "opt_in"`, after `setTrackingEnabled(true)`), with `errorCapture`
 not `false`, and while your game's error capture switch in the dashboard's
-game settings is on. The switch arrives on the session answer. An error
-before that answer (in `love.load`, for example) is held in memory, at most
-5, and sent once the answer says capture is on, or discarded unsent if it is
-off. A player opt-out stops capture at once.
+game settings is on. The switch arrives on the session answer. A crash
+before that answer (in `love.load`, for example) is still saved, at most 5,
+to `ravensight_crash.json` in the save folder, with no trail since the
+switch is not known yet. It is sent once a session answer, this launch or
+the next, says capture is on, and discarded unsent if it says off. A player
+opt-out stops capture at once and deletes that file.
 
 **The trail.** Off unless your game's trail switch is on. Then a crash
 carries `rs_trail`: up to the last 20 lines your game printed, oldest first,

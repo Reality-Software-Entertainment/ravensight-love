@@ -767,4 +767,83 @@ return {
     eq(#off.requests, 0)
     eq(off.fired('tracking_disabled')[2], 'server')
   end },
+
+  -- ------------------------------------------------- automatic error capture
+
+  { 'a 413 is handled like a 400: halved, the bad event dropped, never retried as is', function()
+    local h = harness()
+    h.boot()
+    for i = 1, 3 do h.core:track('e' .. i, {}) end
+    h.openSession()
+    h.answer('/api/v1/track/batch', 413, { error = 'payload_too_large' })
+    eq(#h.batchBody(h.answer('/api/v1/track/batch', 413)), 2)
+    eq(#h.batchBody(h.answer('/api/v1/track/batch', 413)), 1)
+    eq(#h.core.pending, 3)
+    eq(h.core.retryAt, nil, 'no backoff retry')
+    eq(h.fired('flush_failed')[2], 'http_413')
+  end },
+  { 'the session answer sets the error capture switches; absent means on, trail off', function()
+    local h = harness()
+    h.boot()
+    eq(h.core.sessionAnswered, false)
+    h.openSession()
+    eq(h.core.sessionAnswered, true)
+    eq(h.core.errorCaptureEnabled, true); eq(h.core.errorTrailEnabled, false)
+    h.core:readErrorCapture({ errorCapture = { enabled = false, trail = true } })
+    eq(h.core.errorCaptureEnabled, false); eq(h.core.errorTrailEnabled, true)
+    eq(h.core:enqueueError('error', { rs_kind = 'error', rs_source = 'crash' }), nil, 'nothing queued with the switch off')
+    h.core:readErrorCapture({ trackingEnabled = true })
+    eq(h.core.errorCaptureEnabled, false, 'an answer without errorCapture changes nothing')
+  end },
+  { 'a session answer with errorCapture off is read from the session', function()
+    local h = harness()
+    h.boot()
+    h.answer('/api/v1/session', 201, { token = 's', expiresIn = 3600, errorCapture = { enabled = false, trail = false } })
+    eq(h.core:errorCaptureAllowed(), false)
+  end },
+  { 'gameplay events keep their place ahead of automatic errors', function()
+    local h = harness()
+    h.boot()
+    h.openSession()
+    h.answer('/api/v1/track/batch', 202) -- game_started
+    h.core:enqueueError('error', { rs_kind = 'error', rs_source = 'crash', rs_message = 'a' })
+    h.core:track('after', {})
+    h.core:enqueueError('error', { rs_kind = 'error', rs_source = 'crash', rs_message = 'b' })
+    h.core:track('later', {})
+    h.core:track('manual_error', { rs_kind = 'error', rs_message = 'm' })
+    local order = {}
+    for i, e in ipairs(h.core.pending) do order[i] = e.event .. (e.data.rs_message and (':' .. e.data.rs_message) or '') end
+    eq(table.concat(order, ','), 'after,later,manual_error:m,error:a,error:b')
+  end },
+  { 'a gameplay event never lands inside the batch in flight', function()
+    local h = harness()
+    h.boot()
+    h.openSession()
+    h.answer('/api/v1/track/batch', 202)
+    h.core:enqueueError('error', { rs_kind = 'error', rs_source = 'crash' })
+    h.core:flush() -- the error alone is in flight
+    h.core:track('during', {})
+    eq(h.core.pending[1].event, 'error'); eq(h.core.pending[2].event, 'during')
+    h.answer('/api/v1/track/batch', 202)
+    eq(#h.core.pending, 1); eq(h.core.pending[1].event, 'during')
+  end },
+  { 'a full queue drops automatic errors first and an error never evicts gameplay', function()
+    local h = harness({ maxQueueSize = 3 })
+    h.boot() -- game_started
+    h.core:track('g2', {})
+    h.core:enqueueError('error', { rs_kind = 'error', rs_source = 'crash', rs_message = 'x' })
+    h.core:track('g3', {})
+    local names = {}
+    for i, e in ipairs(h.core.pending) do names[i] = e.event end
+    eq(table.concat(names, ','), 'game_started,g2,g3')
+    eq(h.core:enqueueError('error', { rs_kind = 'error', rs_source = 'crash' }), nil)
+    eq(#h.core.pending, 3)
+  end },
+  { 'an opted-out player queues no automatic error', function()
+    local h = harness()
+    h.boot()
+    h.openSession()
+    h.core:setTrackingEnabled(false)
+    eq(h.core:enqueueError('error', { rs_kind = 'error', rs_source = 'crash' }), nil)
+  end },
 }

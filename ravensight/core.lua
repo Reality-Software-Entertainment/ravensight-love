@@ -28,6 +28,7 @@
 local json = require(((...):gsub('core$', 'json')))
 
 local Config = require(((...):gsub('core$', 'config')))
+local Errors = require(((...):gsub('core$', 'errors')))
 
 local Core = {}
 Core.__index = Core
@@ -181,6 +182,13 @@ function Core.new(deps)
   self.eventNonce = nil
   self.eventCounter = 0
   self.warnedTooLarge = false
+  self.inflightSize = 0
+  -- The game's error capture switches, from the session (and settings)
+  -- answer's errorCapture. Absent means capture on and trail off.
+  self.errorCaptureEnabled = true
+  self.errorTrailEnabled = false
+  -- True once a session answer has said which switches hold.
+  self.sessionAnswered = false
 
   self.playtestToken = ''
   self.playtestRunId = ''
@@ -340,6 +348,7 @@ function Core:checkServerSettings()
       if type(parsed) == 'table' and parsed.trackingEnabled ~= nil then
         self.serverTrackingEnabled = parsed.trackingEnabled == true
       end
+      self:readErrorCapture(parsed)
     elseif status == 403 and Core.errorOf(body) == 'tracking_disabled' then
       self.serverTrackingEnabled = false
     elseif status == 401 or status == 403 then
@@ -401,6 +410,21 @@ local function extractError(body, fallback)
   return fallback
 end
 
+--- Reads errorCapture { enabled, trail } from a session or settings answer.
+--- An answer without it leaves the current switches as they are.
+function Core:readErrorCapture(parsed)
+  local switches = type(parsed) == 'table' and parsed.errorCapture
+  if type(switches) ~= 'table' then return end
+  self.errorCaptureEnabled = switches.enabled ~= false
+  self.errorTrailEnabled = switches.trail == true
+end
+
+--- True while automatic error capture may queue anything: tracking is on and
+--- the game's switch is not off.
+function Core:errorCaptureAllowed()
+  return self.trackingEnabled and self.errorCaptureEnabled and not self.keyRefused
+end
+
 --- The `error` field of a JSON answer, or '' when there is none.
 function Core.errorOf(body)
   return extractError(body, '')
@@ -422,6 +446,8 @@ function Core:onSessionResponse(status, body, headers, generation)
     if type(parsed) == 'table' and parsed.token then
       self.sessionToken = tostring(parsed.token)
       self.sessionExpiresAt = self.time() + (tonumber(parsed.expiresIn) or 86400)
+      self:readErrorCapture(parsed)
+      self.sessionAnswered = true
       self.backoff = Core.DEFAULT_RETRY_SECONDS
       self.log('info', 'session ready')
       self:emit('session_ready')
@@ -564,6 +590,24 @@ function Core:nextEventId()
   return Core.eventId(self.deviceId, self.startTime or self.time(), self.eventNonce, self.eventCounter)
 end
 
+--- Queues an error the SDK captured by itself (ravensight/errors.lua built
+--- the data). It goes behind every gameplay event, starts no session and no
+--- send of its own, and fires no event_tracked. Returns the queued data, or
+--- nil when capture is not allowed or the event is too large.
+function Core:enqueueError(name, data)
+  if not self:errorCaptureAllowed() then return nil end
+  return self:enqueue(name, data)
+end
+
+--- The first queued automatic error that is not in the batch in flight.
+function Core:firstQueuedError()
+  local floor = self.flushInProgress and self.inflightSize or 0
+  for i = floor + 1, #self.pending do
+    if Errors.isAutomatic(self.pending[i].data) then return i end
+  end
+  return nil
+end
+
 --- Queues one event, or returns nil when it is too large to send.
 function Core:enqueue(name, data)
   -- Never mutate the caller's table.
@@ -583,10 +627,20 @@ function Core:enqueue(name, data)
     self:emit('flush_failed', 'event_too_large')
     return nil
   end
+  -- Full: an automatic error goes first, so a storm of them can never push
+  -- gameplay out; otherwise the oldest event, as before.
+  local automatic = Errors.isAutomatic(eventData)
   while #self.pending >= self.maxQueueSize do
-    table.remove(self.pending, 1)
+    local oldestError = self:firstQueuedError()
+    -- An automatic error never evicts a gameplay event; it is dropped itself.
+    if automatic and not oldestError then return nil end
+    table.remove(self.pending, oldestError or 1)
   end
-  table.insert(self.pending, { event = name, data = eventData, timestamp = timestamp })
+  -- Gameplay events keep their place ahead of automatic errors, so an error
+  -- burst that is refused or rate-limited never holds gameplay back.
+  local position = #self.pending + 1
+  if not automatic then position = self:firstQueuedError() or position end
+  table.insert(self.pending, position, { event = name, data = eventData, timestamp = timestamp })
   if not self.firstQueuedAt then self.firstQueuedAt = self.now() end
   return eventData
 end
@@ -611,6 +665,7 @@ function Core:flushPending()
   if self.splitBatchSize > 0 then size = math.min(size, self.splitBatchSize) end
   local batch = slice(self.pending, 1, size)
   local generation = self.queueGeneration
+  self.inflightSize = size
 
   self.send({
     method = 'POST',
@@ -630,6 +685,7 @@ function Core:onBatchResponse(status, body, headers, size, generation)
   -- The queue this batch came from was discarded since it went out.
   if generation ~= self.queueGeneration then return end
   self.flushInProgress = false
+  self.inflightSize = 0
 
   if status == 202 then
     self:dropFront(size)
@@ -651,10 +707,11 @@ function Core:onBatchResponse(status, body, headers, size, generation)
     self.log('warn', 'track/batch rate-limited (' .. reason .. ')')
     self:emit('flush_failed', reason)
     self:scheduleRetry(retryAfter(headers))
-  elseif status == 400 then
+  elseif status == 400 or status == 413 then
     -- One oversized event fails the whole batch: halve until it is alone,
-    -- then drop it, so it never costs the events around it.
-    local reason = extractError(body, 'http_400')
+    -- then drop it, so it never costs the events around it. A 413 (too
+    -- large) is the same case and is never retried as is.
+    local reason = extractError(body, 'http_' .. tostring(status))
     if size <= 1 then
       self:dropFront(size)
       self.log('warn', 'dropped one rejected event (' .. reason .. ')')
@@ -673,7 +730,7 @@ function Core:onBatchResponse(status, body, headers, size, generation)
   end
 
   if self.quitting then
-    local stillSending = #self.pending > 0 and (status == 202 or status == 400 or status == 401)
+    local stillSending = #self.pending > 0 and (status == 202 or status == 400 or status == 413 or status == 401)
     if not stillSending then self:finishQuit() end
   end
 end
@@ -808,6 +865,7 @@ function Core:clearQueue()
   self.firstQueuedAt = nil
   self.queueGeneration = self.queueGeneration + 1
   self.flushInProgress = false
+  self.inflightSize = 0
   self.splitBatchSize = 0
 end
 

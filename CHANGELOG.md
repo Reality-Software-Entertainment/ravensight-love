@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.0 - 2026-11-06
 
 - Automatic error capture, on by default: `love.errorhandler` is wrapped and
   chained, so the game's error screen still shows, and a crash is sent as one

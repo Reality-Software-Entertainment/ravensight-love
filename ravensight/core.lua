@@ -33,7 +33,7 @@ local Errors = require(((...):gsub('core$', 'errors')))
 local Core = {}
 Core.__index = Core
 
-Core.VERSION = '0.5.2'
+Core.VERSION = '0.6.0'
 Core.MAX_BATCH_SIZE = 50
 Core.DEFAULT_RETRY_SECONDS = 10
 Core.MAX_BACKOFF_SECONDS = 300

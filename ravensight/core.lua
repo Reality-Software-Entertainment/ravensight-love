@@ -1193,7 +1193,7 @@ end
 --- is written first and the file stays for the next launch.
 function Core:clearQueue(forget)
   if forget then
-    if self.playtestToken == '' then self.storage.remove(Core.queueFile(self.ingestKey)) end
+    if self.playtestToken == '' then self:removeQueueFiles(Core.queueFile(self.ingestKey)) end
   else
     self:saveQueue(true)
   end
@@ -1234,6 +1234,12 @@ end
 
 -- ------------------------------------------------------------ saved queue
 
+--- Deletes the queue file and any temporary file a write left behind.
+function Core:removeQueueFiles(name)
+  self.storage.remove(name)
+  self.storage.remove(name .. '.tmp')
+end
+
 --- Reads the saved queue once, at start: its events go ahead of anything
 --- queued this run. A missing, unreadable, malformed or unknown version file
 --- is an empty queue. Version 1 groups have no origin. The queue file of 0.5
@@ -1263,6 +1269,9 @@ function Core:loadSavedQueue()
     end
   end
   local text = self.storage.read(Core.queueFile(self.ingestKey))
+  -- A file from an older version, or one copied in, is kept out of backups
+  -- too, where the storage can say so.
+  if text and self.storage.exclude then pcall(self.storage.exclude, Core.queueFile(self.ingestKey)) end
   local doc = text and json.decode(text)
   if type(doc) == 'table' and (doc.version == 1 or doc.version == 2) and type(doc.groups) == 'table' then
     for _, group in ipairs(doc.groups) do
@@ -1299,7 +1308,7 @@ function Core:saveQueue(stopping)
   if self.playtestToken ~= '' or not self.queueLoaded or not (stopping or self.trackingEnabled) then return end
   local name = Core.queueFile(self.ingestKey)
   if #self.pending == 0 then
-    self.storage.remove(name)
+    self:removeQueueFiles(name)
     return
   end
   local groups, last = {}, nil

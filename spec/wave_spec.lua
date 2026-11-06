@@ -447,9 +447,80 @@ return {
       local out = pipe:read('*a'); pipe:close()
       assert(out:find('%[Excluded%]'), 'Time Machine reads it as excluded: ' .. out)
     else
-      eq(done, false)
+      eq(done, nil, 'no such call here')
     end
     os.remove(path)
+  end },
+  { 'a failed exclusion is retried once, then one warning with no file contents', function()
+    for name in pairs(package.loaded) do
+      if name == 'ravensight' or name:match('^ravensight%.') then package.loaded[name] = nil end
+    end
+    local rs = require('ravensight')
+    local dir = os.tmpname(); os.remove(dir); os.execute('mkdir -p "' .. dir .. '"')
+    local printed = {}
+    local oldPrint = print
+    print = function(line) printed[#printed + 1] = tostring(line) end
+    _G.love = { filesystem = {
+      getSaveDirectory = function() return dir end,
+      createDirectory = function(n) os.execute('mkdir -p "' .. dir .. '/' .. n .. '"') return true end,
+      getInfo = function(n) local f = io.open(dir .. '/' .. n, 'rb'); if f then f:close() return {} end end,
+      read = function(n) local f = io.open(dir .. '/' .. n, 'rb'); local t = f:read('*a'); f:close(); return t end,
+      write = function(n, t) local f = io.open(dir .. '/' .. n, 'wb'); if not f then return false end f:write(t); f:close(); return true end,
+      remove = function(n) return os.remove(dir .. '/' .. n) ~= nil end,
+    } }
+    local calls = 0
+    rs._excludeFromBackup = function() calls = calls + 1 return false end
+    assert(rs._storage.replace('ravensight/queue-x.json', '{"secret stamp":"o1.zzz"}'))
+    print = oldPrint
+    eq(calls, 2, 'tried twice')
+    eq(#printed, 1, 'one warning')
+    assert(printed[1]:find('out of backups'), printed[1])
+    assert(not printed[1]:find('o1.zzz') and not printed[1]:find('stamp'), 'no file contents in the warning')
+    calls = 0
+    rs._excludeFromBackup = function() calls = calls + 1 return calls == 2 end
+    rs._storage.replace('ravensight/queue-x.json', '{}')
+    eq(calls, 2, 'a retry that succeeds')
+    calls = 0
+    rs._excludeFromBackup = function() calls = calls + 1 return nil end
+    rs._storage.replace('ravensight/queue-x.json', '{}')
+    eq(calls, 1, 'no retry where there is no such call')
+    -- A rename that fails (a folder sits where the file goes) leaves no
+    -- temporary file behind.
+    os.execute('mkdir -p "' .. dir .. '/ravensight/queue-y.json/inner"')
+    rs._storage.replace('ravensight/queue-y.json', '{}')
+    local tmp = io.open(dir .. '/ravensight/queue-y.json.tmp', 'rb')
+    if tmp then tmp:close() end
+    assert(not tmp, 'a failed rename deletes its temporary file')
+    _G.love = nil
+    os.execute('rm -rf "' .. dir .. '"')
+  end },
+  { 'the queue file and a leftover temporary file go on every delete; load applies the exclusion', function()
+    local h = harness()
+    h.boot()
+    h.core:track('a', {})
+    h.core:update()
+    local name = Core.queueFile(KEY)
+    h.files[name .. '.tmp'] = '{"partial'
+    h.core:setTrackingEnabled(false)
+    eq(h.files[name], nil); eq(h.files[name .. '.tmp'], nil, 'opt-out')
+    h.core:setTrackingEnabled(true)
+    h.core:track('b', {}); h.core:update()
+    assert(h.files[name], 'queued again')
+    h.files[name .. '.tmp'] = '{"partial'
+    h.core:resetDeviceId()
+    eq(h.files[name .. '.tmp'], nil, 'a device id reset')
+    local e = harness()
+    e.boot()
+    e.files[name .. '.tmp'] = '{"partial'
+    e.answer('/track/batch', 202)
+    eq(e.files[name], nil); eq(e.files[name .. '.tmp'], nil, 'an emptied queue')
+    -- Reading an existing queue file applies the exclusion to it.
+    local files = { [name] = json.encode({ version = 2, groups = { { events = record(1) } } }) }
+    local l = harness({ files = files })
+    local seen = {}
+    l.core.storage.exclude = function(n) seen[#seen + 1] = n end
+    l.core:start()
+    eq(seen[1], name, 'the existing file is excluded on load')
   end },
   -- ---------------------------------------------------- ads and attribution
   { 'trackAdRevenue sends exactly the seven keys, micros as a digit string', function()

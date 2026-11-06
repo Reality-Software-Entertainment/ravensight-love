@@ -608,7 +608,9 @@ On the desktop (a love.js build delivers through the page's JavaScript SDK):
   is read once and removed.
 - **Device backups.** The file holds origin stamps and scrubbed error
   captures, so it stays out of backups. On macOS the SDK marks it excluded
-  from Time Machine itself. LÖVE gives Lua no way to do this on mobile, so
+  from Time Machine itself, on every write and on a file it reads at start;
+  a failed call is retried once, then logs one warning (never the file's
+  contents) and the queue is still written. LÖVE gives Lua no way to do this on mobile, so
   the game does it:
   - **Android:** the save folder is in the app's internal files, which Auto
     Backup copies. Turn backup off (`android:allowBackup="false"`) or add a

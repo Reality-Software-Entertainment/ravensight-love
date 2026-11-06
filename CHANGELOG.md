@@ -20,7 +20,8 @@ at release.
 - gzip for request bodies of 1,024 bytes or more; a 415, or a 413 for one compressed event, is resent uncompressed once (a 413 for one uncompressed event is dropped, as in 0.6.0).
 - Request signing when the session answer has `signing`, with HMAC-SHA256 in `ravensight/hmac.lua` (LÖVE's `love.data.hash` where available) and the clock corrected by `serverTime`.
 - The shared error queue rules: gameplay events (a game's own `error()` included) go before captured errors, also after the queue is read from disk; a capture evicts only the oldest capture, never a gameplay event; `rs_trail` is never written to the queue file; opting out or resetting the id deletes persisted captures. Saved crashes older than 30 days are still deleted unsent, and held boot errors keep their crash time in milliseconds. Nothing in the batch in flight is ever evicted: with nothing else to make room, the incoming event is dropped.
-- The queue file is excluded from Time Machine on macOS; the README says how to keep it out of Android and iOS backups.
+- The queue file is excluded from Time Machine on macOS, on every write and on a file read at start; a failed call is retried once, then logs one warning with no file contents. The README says how to keep it out of Android and iOS backups.
+- Opt-out, a device id reset and an emptied queue also delete a temporary file a write left behind; a failed rename deletes its temporary file.
 - The local 8 KB check counts an error event's `rs_message`, `rs_stack` and `rs_trail` (within 200, 2,000 and 1,500 characters) one byte a character, as the server does.
 - A 400 with `index` drops only that event; `batch_too_large` and 413 halve; a 503 with Retry-After waits like a 429; `flush()` cuts a backoff wait but never a Retry-After.
 - `trackAd`, `trackAdRevenue`, `microsFromDecimalString`, `microsFromRevenue`, `setAttribution` (once per install) and `getDeliveryStats`.

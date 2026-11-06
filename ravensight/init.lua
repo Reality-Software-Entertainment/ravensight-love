@@ -153,17 +153,27 @@ end
 --- Keeps a file out of backups where the system has a way to say so. On
 --- macOS that is the extended attribute `tmutil addexclusion` writes (its
 --- value is the binary property list of the string "com.apple.backupd").
---- Returns true when it was set. Android and iOS builds need the game's own
+--- Returns true when it was set, false when the call failed, nil where
+--- there is no such call. Android and iOS builds need the game's own
 --- backup rules (see the README); other desktops have no common mechanism.
 local BACKUP_EXCLUDE_NAME = 'com.apple.metadata:com_apple_backup_excludeItem'
 local BACKUP_EXCLUDE_VALUE = '\98\112\108\105\115\116\48\48\95\16\17' .. 'com.apple.backupd'
   .. '\8\0\0\0\0\0\0\1\1\0\0\0\0\0\0\0\1\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\28'
 function ravensight._excludeFromBackup(path)
   local okFfi, ffi = pcall(require, 'ffi')
-  if not okFfi or ffi.os ~= 'OSX' then return false end
+  if not okFfi or ffi.os ~= 'OSX' then return nil end
   pcall(ffi.cdef, 'int setxattr(const char*, const char*, const void*, size_t, uint32_t, int);')
   local ok, result = pcall(ffi.C.setxattr, path, BACKUP_EXCLUDE_NAME, BACKUP_EXCLUDE_VALUE, #BACKUP_EXCLUDE_VALUE, 0, 0)
   return ok and result == 0
+end
+
+--- The exclusion with one retry. A second failure logs one warning that
+--- names no file contents; the queue is still written.
+local function excludeWithRetry(path)
+  local done = ravensight._excludeFromBackup(path)
+  if done == false then done = ravensight._excludeFromBackup(path) end
+  if done == false then log('warn', 'could not keep the event queue out of backups') end
+  return done
 end
 
 local storage = {
@@ -186,13 +196,19 @@ local storage = {
     if dir and dir ~= '' and love.filesystem.write(tmp, text) then
       -- The queue holds origin stamps and scrubbed captures: keep it out of
       -- backups. Set on the new file, so the rename carries it over.
-      ravensight._excludeFromBackup(dir .. '/' .. tmp)
+      excludeWithRetry(dir .. '/' .. tmp)
       if renameOver(dir .. '/' .. tmp, dir .. '/' .. name) then return true end
       love.filesystem.remove(tmp)
     end
     return love.filesystem.write(name, text)
   end,
+  --- Applies the backup exclusion to a file already in the save folder.
+  exclude = function(name)
+    local dir = love.filesystem.getSaveDirectory and love.filesystem.getSaveDirectory()
+    if dir and dir ~= '' then return excludeWithRetry(dir .. '/' .. name) end
+  end,
 }
+ravensight._storage = storage
 
 --- gzip, SHA-256 and the GPU name from LÖVE where it has them.
 local function gzipFunction()

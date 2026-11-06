@@ -903,9 +903,13 @@ function Core:loadSavedQueue()
   self.storage.remove(Core.QUEUE_FILE)
   local saved = json.decode(text)
   if type(saved) ~= 'table' then return end
+  local oldest = self.time() - Errors.PENDING_MAX_AGE
   for _, e in ipairs(saved) do
-    -- Each event keeps its rs_event_id: it lives inside data.
-    if type(e) == 'table' and type(e.event) == 'string' and type(e.timestamp) == 'number' then
+    -- Each event keeps its rs_event_id: it lives inside data. A saved crash
+    -- older than 30 days is deleted unsent.
+    local stale = type(e) == 'table' and type(e.data) == 'table' and e.data.rs_source == 'crash'
+      and type(e.timestamp) == 'number' and e.timestamp < oldest
+    if not stale and type(e) == 'table' and type(e.event) == 'string' and type(e.timestamp) == 'number' then
       table.insert(self.pending, { event = e.event, data = type(e.data) == 'table' and e.data or {}, timestamp = e.timestamp })
     end
   end

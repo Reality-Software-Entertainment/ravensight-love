@@ -307,13 +307,17 @@ local function loadCrashFile()
     if text then storage.remove(CRASH_FILE) end
     return
   end
+  -- At most 5, at most 30 days old; older ones are deleted unsent.
+  local oldest = os.time() - Errors.PENDING_MAX_AGE
   for _, entry in ipairs(saved) do
     if #held >= MAX_HELD then break end
-    if type(entry) == 'table' and type(entry.data) == 'table' and Errors.isAutomatic(entry.data) then
+    if type(entry) == 'table' and type(entry.data) == 'table' and Errors.isAutomatic(entry.data)
+      and type(entry.timestamp) == 'number' and entry.timestamp >= oldest then
       entry.data.rs_trail = nil
       held[#held + 1] = { data = entry.data, timestamp = entry.timestamp }
     end
   end
+  if #held == 0 then storage.remove(CRASH_FILE) end
 end
 
 local afterCrashSaved

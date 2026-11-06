@@ -41,6 +41,7 @@ Errors.TRAIL_CHARS = 1500
 Errors.MESSAGE_CHARS = 200
 Errors.STACK_CHARS = 2000
 Errors.TYPE_CHARS = 100
+Errors.PENDING_MAX_AGE = 30 * 86400 -- seconds a saved crash may wait to be sent
 
 --- Keeps at most `max` bytes, never ending inside a UTF-8 character.
 local function cut(value, max)
@@ -234,12 +235,17 @@ function Errors:trail()
   return table.concat(self.ring, '\n', from)
 end
 
-function Errors:takeToken()
+--- Refills the bucket; true when it holds a token. Takes nothing.
+function Errors:hasToken()
   local t = self.now()
   local rate = Errors.BUCKET_SIZE / Errors.BUCKET_SECONDS
   self.tokens = math.min(Errors.BUCKET_SIZE, self.tokens + (t - self.refilledAt) * rate)
   self.refilledAt = t
-  if self.tokens < 1 then return false end
+  return self.tokens >= 1
+end
+
+function Errors:takeToken()
+  if not self:hasToken() then return false end
   self.tokens = self.tokens - 1
   return true
 end
@@ -248,15 +254,17 @@ end
 --- drops it. opts: source, severity, message, stack, errorType, trail (true
 --- when the game's trail switch is on, 'held' for a boot error).
 function Errors:capture(opts)
+  -- The session cap and the bucket first: past them, nothing is scrubbed,
+  -- templated or keyed, so an error every frame costs almost nothing.
+  if self.captures >= Errors.MAX_CAPTURES or not self:hasToken() then return nil end
   local message = Errors.scrubField(tostring(opts.message or ''), Errors.MESSAGE_CHARS)
   local stack = opts.stack and Errors.scrubField(tostring(opts.stack), Errors.STACK_CHARS) or nil
   local errorType = opts.errorType and cut(tostring(opts.errorType), Errors.TYPE_CHARS) or nil
   local frame = Errors.firstFrame(stack) or Errors.firstFrame(message) or ''
   local key = (errorType or '') .. '|' .. Errors.template(message) .. '|' .. frame
 
-  if self.captures >= Errors.MAX_CAPTURES then return nil end
   if (self.perKey[key] or 0) >= Errors.MAX_PER_KEY then return nil end
-  if not self:takeToken() then return nil end
+  self:takeToken()
   self.captures = self.captures + 1
   self.perKey[key] = (self.perKey[key] or 0) + 1
 

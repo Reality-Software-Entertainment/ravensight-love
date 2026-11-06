@@ -474,8 +474,9 @@ game settings is on. The switch arrives on the session answer. A crash
 before that answer (in `love.load`, for example) is still saved, at most 5,
 to `ravensight_crash.json` in the save folder, with no trail since the
 switch is not known yet. It is sent once a session answer, this launch or
-the next, says capture is on, and discarded unsent if it says off. A player
-opt-out stops capture at once and deletes that file.
+the next, says capture is on, and discarded unsent if it says off. A saved
+crash older than 30 days is deleted unsent. A player opt-out or
+`resetDeviceId()` stops capture at once and deletes that file.
 
 **The trail.** Off unless your game's trail switch is on. Then a crash
 carries `rs_trail`: up to the last 20 lines your game printed, oldest first,

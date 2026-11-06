@@ -733,6 +733,48 @@ return {
       eq(files['ravensight_crash.json'], nil, 'discarded')
     end)
   end },
+  { 'error capture: a saved crash older than 30 days is deleted unsent, and a reset deletes the rest', function()
+    local now = os.time()
+    local function entry(age) return { data = { rs_kind = 'error', rs_source = 'crash', rs_message = 'age ' .. age }, timestamp = now - age } end
+    local files = { ['ravensight_crash.json'] = json.encode({ entry(31 * 86400) }) }
+    run(nil, files, function(w)
+      local sent = errorWorld(w, {})
+      w.sdk.init({ ingestKey = 'gt_live_k', synchronous = true })
+      eq(files['ravensight_crash.json'], nil, 'only a stale crash: the file is deleted at load')
+      for _ = 1, 3 do w.sdk.update(0) end
+      w.clock = 10; w.sdk.update(0); w.sdk.update(0)
+      for _, r in ipairs(sent) do assert(not (r.body or ''):find('age ', 1, true), 'never sent') end
+    end)
+    files['ravensight_crash.json'] = json.encode({ entry(31 * 86400), entry(86400) })
+    files['ravensight_queue.json'] = json.encode({
+      { event = 'error', data = entry(40 * 86400).data, timestamp = now - 40 * 86400 },
+      { event = 'level_start', data = {}, timestamp = now - 40 * 86400 },
+    })
+    run(nil, files, function(w)
+      local sent = errorWorld(w, {})
+      w.sdk.init({ ingestKey = 'gt_live_k', synchronous = true })
+      for _ = 1, 3 do w.sdk.update(0) end
+      w.clock = 10; w.sdk.update(0); w.sdk.update(0)
+      local messages, levels = {}, 0
+      for _, r in ipairs(sent) do
+        if r.url:find('/track/batch$') then
+          for _, e in ipairs(json.decode(r.body).events) do
+            if e.data.rs_message then messages[#messages + 1] = e.data.rs_message end
+            if e.event == 'level_start' then levels = levels + 1 end
+          end
+        end
+      end
+      eq(#messages, 1, 'only the fresh crash is sent'); eq(messages[1], 'age 86400')
+      eq(levels, 1, 'old gameplay events are untouched')
+    end)
+    files['ravensight_crash.json'] = json.encode({ entry(86400) })
+    run(nil, files, function(w)
+      errorWorld(w, {})
+      w.sdk.init({ ingestKey = 'gt_live_k', synchronous = true })
+      w.sdk.resetDeviceId()
+      eq(files['ravensight_crash.json'], nil, 'a reset deletes the saved crash')
+    end)
+  end },
   { 'error capture: an opt-out or errorCapture = false removes a saved crash', function()
     local files = { ['ravensight_crash.json'] = '[{"data":{"rs_kind":"error","rs_source":"crash"},"timestamp":1}]' }
     run(nil, files, function(w)

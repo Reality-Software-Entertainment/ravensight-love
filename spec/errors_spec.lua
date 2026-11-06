@@ -123,6 +123,30 @@ return {
     end
     eq(sent, 30, 'at most 30 captures in all')
   end },
+  { 'once the caps are spent, a capture is never scrubbed or templated', function()
+    local c = clock()
+    local e = Errors.new({ now = c.now })
+    for i = 1, 6 do assert(capture(e, 'burst.lua:1: ' .. string.char(96 + i))) end
+    local scrub, template = Errors.scrub, Errors.template
+    local calls = 0
+    Errors.scrub = function(...) calls = calls + 1; return scrub(...) end
+    Errors.template = function(...) calls = calls + 1; return template(...) end
+    local ok, err = pcall(function()
+      eq(capture(e, 'late.lua:1: x', { stack = 'late.lua:1: in x' }), nil, 'the bucket is empty')
+      eq(calls, 0, 'no scrub or template with the bucket empty')
+      for i = 1, 40 do
+        c.t = c.t + 60
+        capture(e, 'k' .. string.rep('z', i) .. '.lua:1: x')
+      end
+      eq(e.captures, 30)
+      calls = 0
+      c.t = c.t + 60
+      eq(capture(e, 'more.lua:1: x', { stack = 'more.lua:1: in x' }), nil, 'over the session cap')
+      eq(calls, 0, 'no scrub or template past the session cap')
+    end)
+    Errors.scrub, Errors.template = scrub, template
+    assert(ok, err)
+  end },
   { 'the trail: last 20 lines, scrubbed, cut to 120, times from start, at most 10', function()
     local c = clock()
     local e = Errors.new({ now = c.now })

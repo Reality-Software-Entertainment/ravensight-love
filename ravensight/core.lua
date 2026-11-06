@@ -817,11 +817,14 @@ function Core:enqueue(name, data)
   -- gameplay out; an automatic error never evicts a gameplay event, it is
   -- dropped itself.
   local automatic = Errors.isAutomatic(eventData)
+  -- Nothing in the batch in flight is ever evicted: with nothing else to
+  -- make room, the incoming event is the one dropped.
   while #self.pending >= self:queueCap() do
-    local oldestError = self:firstQueuedError()
+    local victim = self:firstQueuedError()
+    if not victim and not automatic then victim = self:oldestOutsideFlight() end
     self.deliveryStats.dropped_overflow = self.deliveryStats.dropped_overflow + 1
-    if automatic and not oldestError then return nil end
-    table.remove(self.pending, oldestError or 1)
+    if not victim then return nil end
+    table.remove(self.pending, victim)
   end
   -- Gameplay events keep their place ahead of automatic errors. The session
   -- it was queued under goes with it, so a later session can send it with
@@ -839,11 +842,20 @@ function Core:queueCap()
   return math.max(1, math.min(self.maxQueueSize, Core.QUEUE_MAX_EVENTS))
 end
 
---- Drops events past the cap, automatic errors first, then the oldest, and
---- counts them.
+--- The oldest event outside the batch in flight, or nil.
+function Core:oldestOutsideFlight()
+  local first = (self.flushInProgress and self.inflightSize or 0) + 1
+  if first <= #self.pending then return first end
+  return nil
+end
+
+--- Drops events past the cap, automatic errors first, then the oldest,
+--- never from the batch in flight, and counts them.
 function Core:trimQueue()
   while #self.pending > self:queueCap() do
-    table.remove(self.pending, self:firstQueuedError() or 1)
+    local victim = self:firstQueuedError() or self:oldestOutsideFlight()
+    if not victim then return end
+    table.remove(self.pending, victim)
     self.deliveryStats.dropped_overflow = self.deliveryStats.dropped_overflow + 1
   end
 end

@@ -401,6 +401,56 @@ return {
     r.core:resetDeviceId()
     eq(r.files[Core.queueFile(KEY)], nil, 'a device id reset deletes persisted captures')
   end },
+  { 'error rule: nothing in the batch in flight is ever evicted', function()
+    local cap = function(m) return { rs_kind = 'error', rs_severity = 'error', rs_message = m, rs_source = 'log' } end
+    local h = harness()
+    h.boot()
+    h.answer('/track/batch', 202)
+    h.core.maxQueueSize = 4
+    h.core:track('a', {})
+    h.core:track('c1', cap('1'))
+    h.core:flush()
+    eq(h.names(h.requests[1].req), 'a,c1', 'a batch with a capture in flight')
+    h.core:track('b', {})
+    h.core:track('c2', cap('2'))
+    h.core:track('c3', cap('3'))
+    eq(h.pendingNames(), 'a,c1,b,c3', 'the capture outside the flight went, not the one in it')
+    h.core:track('c', {})
+    eq(h.pendingNames(), 'a,c1,b,c', 'gameplay evicts the capture outside the flight')
+    h.core:track('d', {})
+    eq(h.pendingNames(), 'a,c1,c,d', 'then the oldest outside the flight')
+    h.answer('/track/batch', 202)
+    eq(h.pendingNames(), 'c,d', 'the answer removes exactly the batch it sent')
+    local full = harness()
+    full.boot()
+    full.answer('/track/batch', 202)
+    full.core.maxQueueSize = 2
+    full.core:track('x', cap('x'))
+    full.core:track('y', {})
+    full.core:flush()
+    full.core:track('z', {})
+    full.core:track('w', cap('w'))
+    eq(full.pendingNames(), 'y,x', 'all in flight: the incoming events are dropped')
+  end },
+  { 'the queue file is kept out of backups on macOS; elsewhere the helper says it could not', function()
+    for name in pairs(package.loaded) do
+      if name == 'ravensight' or name:match('^ravensight%.') then package.loaded[name] = nil end
+    end
+    local rs = require('ravensight')
+    local path = os.tmpname()
+    local f = assert(io.open(path, 'wb')); f:write('{}'); f:close()
+    local okFfi, ffi = pcall(require, 'ffi')
+    local done = rs._excludeFromBackup(path)
+    if okFfi and ffi.os == 'OSX' then
+      assert(done, 'set on macOS')
+      local pipe = io.popen('tmutil isexcluded ' .. path)
+      local out = pipe:read('*a'); pipe:close()
+      assert(out:find('%[Excluded%]'), 'Time Machine reads it as excluded: ' .. out)
+    else
+      eq(done, false)
+    end
+    os.remove(path)
+  end },
   -- ---------------------------------------------------- ads and attribution
   { 'trackAdRevenue sends exactly the seven keys, micros as a digit string', function()
     local name, props = Typed.ad('admob', 'rewarded', 'shown', { placement = 'level_end', revenueMicros = '1500', currency = 'USD' })

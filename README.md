@@ -606,6 +606,17 @@ On the desktop (a love.js build delivers through the page's JavaScript SDK):
   dropped before a gameplay event, and queues behind gameplay), and events older
   than 89 days are dropped when it is read. The 0.5 `ravensight_queue.json`
   is read once and removed.
+- **Device backups.** The file holds origin stamps and scrubbed error
+  captures, so it stays out of backups. On macOS the SDK marks it excluded
+  from Time Machine itself. LÖVE gives Lua no way to do this on mobile, so
+  the game does it:
+  - **Android:** the save folder is in the app's internal files, which Auto
+    Backup copies. Turn backup off (`android:allowBackup="false"`) or add a
+    backup rules file that excludes the save folder's `ravensight/`
+    subfolder, in both `full-backup-content` and `data-extraction-rules`.
+  - **iOS:** set `NSURLIsExcludedFromBackupKey` on the save folder's
+    `ravensight/` subfolder from the app's native code.
+  - Windows and Linux have no common way to say it; nothing is done there.
 - **Removed only when delivered.** An event leaves the file only after a 2xx
   answer, or a 400 that refuses it, and that removal is saved first.
 - **Origin.** Each session's events are saved with the session answer's

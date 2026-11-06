@@ -21,9 +21,9 @@
 --   5. IPv4 and IPv6 addresses become [ip]
 --   6. a run of 32 or more characters from [A-Za-z0-9+/=_-] that contains
 --      at least one digit becomes [token], unless it has a / and every /
---      piece is empty or a path word under 32 characters (lowercase words
---      joined by _ or -, CamelCase, or a capital or digit acronym of 1 to
---      6), so file paths stay and secrets with slashes do not
+--      piece is empty or a path word under 32 characters (parts joined by
+--      _ or -, each lowercase, CamelCase, or a capital or digit acronym of
+--      1 to 6), so file paths stay and secrets with slashes do not
 --
 -- MIT licensed, part of ravensight-love.
 
@@ -94,10 +94,9 @@ local function ipv6(match)
   return '[ip]'
 end
 
--- A path word: lowercase words and digits joined by single _ or -.
+-- A path word part: lowercase letters and digits.
 local function lowerWord(p)
-  if not p:match('^[%l%d_%-]+$') or p:match('^[_%-]') or p:match('[_%-]$') or p:match('[_%-][_%-]') then return false end
-  return true
+  return p:match('^[%l%d]+$') ~= nil
 end
 
 -- A path word: CamelCase, a capital then lowercase or digits, and every later
@@ -114,9 +113,19 @@ local function camelWord(p)
   return true
 end
 
+local function pathPart(p)
+  return lowerWord(p) or camelWord(p) or (#p >= 1 and #p <= 6 and p:match('^[%u%d]+$') ~= nil)
+end
+
+-- A path word: one or more parts joined by _ or -, each part lowercase,
+-- CamelCase or an acronym, so BP_Player_Controller_2026 is a word.
 local function pathPiece(p)
+  if p == '' then return true end
   if #p >= 32 then return false end
-  return p == '' or lowerWord(p) or camelWord(p) or (#p <= 6 and p:match('^[%u%d]+$') ~= nil)
+  for part in (p .. '_'):gmatch('([^_%-]*)[_%-]') do
+    if part == '' or not pathPart(part) then return false end
+  end
+  return true
 end
 
 -- A run with a / is kept only when every piece is a path word, so a file

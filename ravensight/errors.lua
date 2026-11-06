@@ -19,8 +19,9 @@
 --   3. an email address becomes [email]
 --   4. /Users/<name>, /home/<name> and C:\Users\<name> become ~
 --   5. IPv4 and IPv6 addresses become [ip]
---   6. a run of 32 or more base64 or hex characters that contains at least
---      one digit becomes [token] (so long snake_case names in a stack stay)
+--   6. a run of 32 or more characters from [A-Za-z0-9+=_-] that contains at
+--      least one digit becomes [token]; long snake_case names in a stack
+--      stay, and / is not in the class, so file paths stay too
 --
 -- MIT licensed, part of ravensight-love.
 
@@ -91,8 +92,8 @@ local function ipv6(match)
   return '[ip]'
 end
 
-local function tokenRun(run, pad)
-  if #run < 32 or not run:find('%d') then return run .. pad end
+local function tokenRun(run)
+  if #run < 32 or not run:find('%d') then return run end
   return '[token]'
 end
 
@@ -109,7 +110,7 @@ function Errors.scrub(text)
   text = text:gsub('/home/[^/%s\'"]+', '~')
   text = text:gsub('%f[%w_]%d+%.%d+%.%d+%.%d+%f[^%w_]', ipv4)
   text = text:gsub('%f[%w_:][%x:]*:[%x:]*%f[^%w_:]', ipv6)
-  text = text:gsub('([%w%+/_%-]+)(=?=?)', tokenRun)
+  text = text:gsub('[%w%+=_%-]+', tokenRun)
   return text
 end
 

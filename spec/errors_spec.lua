@@ -19,7 +19,7 @@ local VECTORS = {
   { 'from 192.168.0.1 and 1234.1.1.1 and 10.0.0.256', 'from [ip] and 1234.1.1.1 and [ip]' },
   { 'v6 2001:0db8:85a3:0000:0000:8a2e:0370:7334 and ::1 and fe80::1ff:fe23:4567:890a and Foo::bar and 12:30:45', 'v6 [ip] and [ip] and [ip] and Foo::bar and 12:30:45' },
   { 'run 0123456789abcdef0123456789abcdef and OnPointerClickHandlerImplementationXYZ', 'run [token] and OnPointerClickHandlerImplementationXYZ' },
-  { 'path a/b/c/d/e/f/g/h/i/j/k/l/m/n/o/p/q1 and aaaaaaaaaaaaaaaaaaaaaa1/b', 'path [token] and aaaaaaaaaaaaaaaaaaaaaa1/b' },
+  { 'path a/b/c/d/e/f/g/h/i/j/k/l/m/n/o/p/q1 and aaaaaaaaaaaaaaaaaaaaaa1/b', 'path a/b/c/d/e/f/g/h/i/j/k/l/m/n/o/p/q1 and aaaaaaaaaaaaaaaaaaaaaa1/b' },
   { 'padded QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo1234== x', 'padded [token] x' },
   { '[love "boot.lua"]:345: in function <[love "boot.lua"]:341>', '[love "boot.lua"]:345: in function <[love "boot.lua"]:341>' },
   { 'ftp://host/path#x mailto:x@y.zz', 'ftp://host/path mailto:[email]' },
@@ -52,6 +52,16 @@ return {
     eq(Errors.scrub('on_pointer_click_handler_for_the_menu'), 'on_pointer_click_handler_for_the_menu')
     eq(Errors.scrub(string.rep('a', 31) .. '1'), '[token]')
     eq(Errors.scrub(string.rep('a', 30) .. '1'), string.rep('a', 30) .. '1')
+  end },
+  { 'a long file path with a digit keeps its file: / is not in the token run', function()
+    local path = 'res://addons/inventory_system2/ui/inventory_slot.gd:12'
+    eq(Errors.scrub(path), path)
+    local deep = 'game/levels/world_2_the_frozen_caverns/boss_room_3/phase_2.lua:40: x'
+    assert(#deep > 32)
+    eq(Errors.scrub(deep), deep)
+    -- One piece of 32 or more with a digit is still a token, path or not.
+    eq(Errors.scrub('a/' .. string.rep('b', 31) .. '1/c.lua'), 'a/[token]/c.lua')
+    eq(Errors.scrub('k=' .. string.rep('a', 30) .. '1=='), '[token]', '= is in the run class')
   end },
   { 'the template takes out numbers, hex, ids, urls and quoted text', function()
     eq(Errors.template('main.lua:10: bad "x" at 12 in deadbeef99 https://a.b/c'), 'main.lua:0: bad "*" at 0 in <hex> <url>')

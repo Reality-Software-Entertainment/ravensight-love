@@ -144,6 +144,15 @@ return {
     end
     eq(withTrail, 10)
   end },
+  { 'a held boot capture carries the trail without counting it until claimed', function()
+    local e = Errors.new({ now = clock().now })
+    e:record('info', 'loading')
+    local d = capture(e, 'main.lua:1: early', { trail = 'held' })
+    eq(d.rs_trail, '+0 info loading'); eq(e.trails, 0, 'not counted while held')
+    eq(e:claimTrail(), true); eq(e.trails, 1)
+    e.trails = Errors.MAX_TRAILS
+    eq(e:claimTrail(), false, 'over the cap the held trail is not sent')
+  end },
   { 'the trail is never attached with the switch off', function()
     local e = Errors.new({ now = clock().now })
     e:record('info', 'hello')

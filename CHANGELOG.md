@@ -4,11 +4,12 @@
 
 - Automatic error capture, on by default: `love.errorhandler` is wrapped and
   chained, so the game's error screen still shows, and a crash is sent as one
-  `error` event (`rs_source = "crash"`) on the event meter. Opt out with
+  `error` event (`rs_source = "crash"`, `rs_severity = "critical"`) on the event meter. Opt out with
   `init({ errorCapture = false })` or the game's switch.
 - The crash is saved to the save folder before the handler returns and sent
   on the next launch if the process dies first; while the error screen is
-  open the SDK keeps sending.
+  open the SDK keeps sending from its background thread (never with
+  `synchronous = true`, which would freeze the error screen).
 - Only with a key and consent; the session answer's `errorCapture.enabled`
   decides. Errors before that answer are held in memory, at most 5, then sent
   or discarded.

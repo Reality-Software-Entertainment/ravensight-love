@@ -450,7 +450,7 @@ also wraps `print`, only to keep the last 20 lines in memory for the trail
 so a printed line is never captured as an error by itself.
 
 **The event.** `rs_kind = "error"`, `rs_source = "crash"`,
-`rs_severity = "error"`, `rs_message` (the error, at most 200 characters)
+`rs_severity = "critical"`, `rs_message` (the error, at most 200 characters)
 and `rs_stack` (the Lua traceback, at most 2,000). Before queueing, both are
 scrubbed: emails become `[email]`; bearer tokens, JWT-shaped strings, `gt_`
 keys and runs of 32 or more letters, digits, `+`, `/`, `=`, `_` or `-` with
@@ -461,8 +461,11 @@ not; IP addresses become `[ip]`; `/Users/<name>`, `/home/<name>` and
 
 **It survives the crash.** The crash is written to the save folder (the same
 `ravensight_queue.json` used on quit) before your handler runs. While the
-error screen is open the SDK keeps sending, and once the crash is delivered
-the file is emptied. If the process dies first, the next launch sends it.
+error screen is open the SDK keeps sending from its background thread, and
+once the crash is delivered the file is emptied. If the process dies first,
+the next launch sends it. With `synchronous = true` (no background thread)
+nothing is sent from the error screen, since a request would freeze it: the
+saved crash goes on the next launch.
 
 **When it is on.** Only with a key, after the player's consent (with
 `consent = "opt_in"`, after `setTrackingEnabled(true)`), with `errorCapture`
@@ -495,12 +498,12 @@ scrubs it) and is never blocked by the switch.
 
 **On the web.** A love.js build runs the same `love.errorhandler` hook and
 hands the crash to the page as an ordinary `track` line, which the bridge
-passes to the JavaScript SDK. The Lua side has no session answer there, so
-the page's SDK and the server apply the game's switch (an automatic error
-with capture off is dropped free on the server), and a web crash carries no
-trail. A Lua error never reaches the page as a JavaScript error, so the
-JavaScript SDK's own capture does not send it a second time. The device
-limits above still apply on the Lua side.
+passes to the JavaScript SDK's `track`. Neither the Lua side nor the bridge
+sees the game's error capture switch there. The event carries
+`rs_source = "crash"`, so when the switch is off the server drops it before
+it is counted, free. A web crash carries no trail. A Lua error never reaches
+the page as a JavaScript error, so the JavaScript SDK's own capture does not
+send it a second time. The device limits above still apply on the Lua side.
 
 **One visible difference.** A traceback LÖVE prints for a crash has one more
 line, the SDK's handler, between your code and LÖVE's.

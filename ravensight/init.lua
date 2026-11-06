@@ -246,7 +246,7 @@ local function captureCrash(msg, stack)
   if not capture or not core then return end
   if transportName == 'web' then
     if not core.trackingEnabled then return end
-    local data = capture:capture({ source = 'crash', severity = 'error', message = tostring(msg), stack = stack })
+    local data = capture:capture({ source = 'crash', severity = 'critical', message = tostring(msg), stack = stack })
     if data then core:track('error', data) end
     return
   end
@@ -254,13 +254,13 @@ local function captureCrash(msg, stack)
   if not core.sessionAnswered then
     -- A boot error: the switch is not known yet. Held in memory only.
     if #held >= MAX_HELD then return end
-    local data = capture:capture({ source = 'crash', severity = 'error', message = tostring(msg), stack = stack, trail = true })
+    local data = capture:capture({ source = 'crash', severity = 'critical', message = tostring(msg), stack = stack, trail = 'held' })
     if data then held[#held + 1] = data end
     return
   end
   if not core:errorCaptureAllowed() then return end
   local data = capture:capture({
-    source = 'crash', severity = 'error', message = tostring(msg), stack = stack,
+    source = 'crash', severity = 'critical', message = tostring(msg), stack = stack,
     trail = core.errorTrailEnabled,
   })
   if not data or not core:enqueueError('error', data) then return end
@@ -278,7 +278,8 @@ local function releaseHeld()
   held = {}
   if not core:errorCaptureAllowed() then return end
   for _, data in ipairs(list) do
-    if not core.errorTrailEnabled then data.rs_trail = nil end
+    -- A held trail counts against the 10 only when it is actually sent.
+    if data.rs_trail and not (core.errorTrailEnabled and capture:claimTrail()) then data.rs_trail = nil end
     core:enqueueError('error', data)
   end
   core:saveQueue()
@@ -305,7 +306,9 @@ local function installErrorHandler()
     pcall(captureCrash, msg, stack)
     afterCrashSaved = core and core.pending and #core.pending or 0
     local loop = previous(msg, ...)
-    if type(loop) ~= 'function' or transportName == 'web' or not core then return loop end
+    -- With no worker thread every request blocks the frame it is sent from,
+    -- so the error screen sends nothing: the saved crash goes next launch.
+    if type(loop) ~= 'function' or transportName == 'web' or not core or not requestChannel then return loop end
     return function(...)
       pcall(pumpAfterCrash)
       local result = loop(...)

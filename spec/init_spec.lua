@@ -97,6 +97,40 @@ local function errorWorld(w, session)
   return sent
 end
 
+--- Replaces the synchronous transport with a fake love.thread: requests go
+--- on a channel and w.serve() answers them through the errorWorld transport.
+local function threaded(w)
+  local channels = {}
+  local function channel(name)
+    if not channels[name] then
+      local q = {}
+      channels[name] = {
+        push = function(_, v) q[#q + 1] = v end,
+        pop = function() return table.remove(q, 1) end,
+      }
+    end
+    return channels[name]
+  end
+  love.thread = { getChannel = channel, newThread = function() return { start = function() end } end }
+  local transport = package.loaded['ravensight.transport'].select()
+  function w.serve()
+    for name, ch in pairs(channels) do
+      if name:find('^ravensight_requests_') then
+        local responses = channels[(name:gsub('requests', 'responses'))]
+        while true do
+          local m = ch:pop()
+          if not m then break end
+          if m ~= 'stop' then
+            local req = json.decode(m)
+            local status, body, headers = transport.request(req)
+            responses:push(json.encode({ kind = 'response', id = req.id, status = status, body = body, headers = headers }))
+          end
+        end
+      end
+    end
+  end
+end
+
 return {
   { 'love.js is detected from the OS and init returns at once', function()
     run('Web', nil, function(w)
@@ -557,11 +591,12 @@ return {
 
   -- ------------------------------------------------- automatic error capture
 
-  { 'error capture: a crash is queued, saved before the handler returns, and the game handler still runs', function()
+  { 'error capture: a crash is critical, saved before the handler returns, and sent from the error screen thread', function()
     run(nil, nil, function(w)
       local sent = errorWorld(w, {})
-      w.sdk.init({ ingestKey = 'gt_live_k', synchronous = true })
-      for _ = 1, 3 do w.sdk.update(0) end
+      threaded(w)
+      w.sdk.init({ ingestKey = 'gt_live_k' })
+      for _ = 1, 3 do w.serve(); w.sdk.update(0) end
       assert(love.errorhandler ~= w.defaultHandler, 'wrapped')
       local loop = love.errorhandler('main.lua:3: boom for jane@example.com')
       eq(w.handled[1], 'main.lua:3: boom for jane@example.com', 'the previous handler saw the same message')
@@ -569,18 +604,34 @@ return {
       local saved = json.decode(w.files['ravensight_queue.json'])
       local crash = saved[#saved]
       eq(crash.event, 'error'); eq(crash.data.rs_source, 'crash'); eq(crash.data.rs_kind, 'error')
-      eq(crash.data.rs_severity, 'error')
+      eq(crash.data.rs_severity, 'critical')
       eq(crash.data.rs_message, 'main.lua:3: boom for [email]')
       eq(crash.data.rs_trail, nil, 'trail off by default')
       eq(crash.data.rs_fp, nil)
-      -- The error screen runs; the SDK sends from it, then forgets the file.
-      w.clock = 10
-      eq(loop(), nil)
+      -- The worker sends; the error screen frame reads the answer and forgets the file.
+      w.serve()
       local last = json.decode(sent[#sent].body)
       eq(last.events[#last.events].data.rs_source, 'crash')
-      eq(loop(), nil) -- the answer arrives on the next frame
+      eq(loop(), nil)
       eq(w.files['ravensight_queue.json'], nil, 'nothing left to resend next launch')
+      eq(loop(), nil)
       eq(w.loopRuns, 2, 'the game error loop ran every frame')
+    end)
+  end },
+  { 'error capture: with a synchronous transport the error screen sends nothing; the saved crash waits', function()
+    run(nil, nil, function(w)
+      local sent = errorWorld(w, {})
+      w.sdk.init({ ingestKey = 'gt_live_k', synchronous = true })
+      for _ = 1, 3 do w.sdk.update(0) end
+      local before = #sent
+      local loop = love.errorhandler('main.lua:3: boom')
+      eq(#sent, before, 'the handler sends nothing')
+      w.clock = 100
+      for _ = 1, 5 do loop() end
+      eq(#sent, before, 'no request from the error screen')
+      eq(w.loopRuns, 5)
+      local saved = json.decode(w.files['ravensight_queue.json'])
+      eq(saved[#saved].data.rs_source, 'crash', 'saved for the next launch')
     end)
   end },
   { 'error capture: a previous handler that returns nothing still returns nothing', function()

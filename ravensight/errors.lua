@@ -246,7 +246,7 @@ end
 
 --- Builds the data of one automatic error event, or returns nil when a cap
 --- drops it. opts: source, severity, message, stack, errorType, trail (true
---- when the game's trail switch is on).
+--- when the game's trail switch is on, 'held' for a boot error).
 function Errors:capture(opts)
   local message = Errors.scrubField(tostring(opts.message or ''), Errors.MESSAGE_CHARS)
   local stack = opts.stack and Errors.scrubField(tostring(opts.stack), Errors.STACK_CHARS) or nil
@@ -268,14 +268,23 @@ function Errors:capture(opts)
   }
   if stack and stack ~= '' then data.rs_stack = stack end
   if errorType and errorType ~= '' then data.rs_error_type = errorType end
+  -- trail = 'held' (a boot error, before the switch is known) attaches the
+  -- trail without counting it; claimTrail() counts it when it is sent.
   if opts.trail and self.trails < Errors.MAX_TRAILS then
     local trail = self:trail()
     if trail then
-      self.trails = self.trails + 1
+      if opts.trail ~= 'held' then self.trails = self.trails + 1 end
       data.rs_trail = trail
     end
   end
   return data
+end
+
+--- Counts one trail against the cap; false when the cap is reached.
+function Errors:claimTrail()
+  if self.trails >= Errors.MAX_TRAILS then return false end
+  self.trails = self.trails + 1
+  return true
 end
 
 --- True for an event the SDK captured by itself: an error with an automatic

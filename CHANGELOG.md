@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+- Automatic error capture, on by default: `love.errorhandler` is wrapped and
+  chained, so the game's error screen still shows, and a crash is sent as one
+  `error` event (`rs_source = "crash"`) on the event meter. Opt out with
+  `init({ errorCapture = false })` or the game's switch.
+- The crash is saved to the save folder before the handler returns and sent
+  on the next launch if the process dies first; while the error screen is
+  open the SDK keeps sending.
+- Only with a key and consent; the session answer's `errorCapture.enabled`
+  decides. Errors before that answer are held in memory, at most 5, then sent
+  or discarded.
+- Device limits per launch: 30 captures, 3 per error, 10 trails, 6 a minute.
+  Message, stack and trail are scrubbed on the device by the platform's rules.
+- An optional trail of the last 20 printed lines, only when the game's trail
+  switch is on; the SDK's own lines are never in it.
+- Gameplay events stay ahead of captured errors in the queue, and errors are
+  dropped first when it is full. A 413 is handled like a 400.
+- Web builds capture through the same hook and hand the crash to the page's
+  JavaScript SDK as a track line, with no trail.
+- `ravensight.error` is unchanged.
+
 ## 0.5.2 - 2026-10-25
 
 - Fix natural browser `pagehide` ordering so LÖVE exit-mailbox and health

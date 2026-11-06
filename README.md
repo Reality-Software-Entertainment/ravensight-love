@@ -328,6 +328,7 @@ end
 | `timeout` | `15` | Seconds per request. |
 | `debug` | `false` | Print informational messages too. Warnings always print. |
 | `performance` | `false` | Sample the frame rate once a second and send one `health` event per session. See "Typed events". |
+| `errorCapture` | `true` | `false` turns automatic error capture off for this game build. See "Error capture". The manual `ravensight.error` still works. |
 
 ### Functions
 
@@ -434,6 +435,74 @@ sends no health event. The web summary has no memory or boot figure.
 An Android or iOS build has no quit to hook, so it sends no health event
 yet.
 
+## Error capture
+
+On by default. When your game crashes, the SDK sends the error as one
+ordinary `error` event: one captured error is one event on the shared event
+meter, with no separate price. Everything below happens on the player's
+device, before anything is queued.
+
+**What it hooks.** `love.errorhandler` (the handler LÖVE runs on an uncaught
+Lua error). The SDK keeps the handler that was there before, yours or LÖVE's,
+and calls it with the same message, so your error screen still shows. It
+also wraps `print`, only to keep the last 20 lines in memory for the trail
+(below); `print` still prints exactly what it did. LÖVE has no log levels,
+so a printed line is never captured as an error by itself.
+
+**The event.** `rs_kind = "error"`, `rs_source = "crash"`,
+`rs_severity = "error"`, `rs_message` (the error, at most 200 characters)
+and `rs_stack` (the Lua traceback, at most 2,000). Before queueing, both are
+scrubbed: emails become `[email]`; bearer tokens, JWT-shaped strings, `gt_`
+keys and runs of 32 or more base64 or hex characters with a digit become
+`[token]`; IP addresses become `[ip]`; `/Users/<name>`, `/home/<name>` and
+`C:\Users\<name>` become `~`; a URL loses its query and fragment.
+
+**It survives the crash.** The crash is written to the save folder (the same
+`ravensight_queue.json` used on quit) before your handler runs. While the
+error screen is open the SDK keeps sending, and once the crash is delivered
+the file is emptied. If the process dies first, the next launch sends it.
+
+**When it is on.** Only with a key, after the player's consent (with
+`consent = "opt_in"`, after `setTrackingEnabled(true)`), with `errorCapture`
+not `false`, and while your game's error capture switch in the dashboard's
+game settings is on. The switch arrives on the session answer. An error
+before that answer (in `love.load`, for example) is held in memory, at most
+5, and sent once the answer says capture is on, or discarded unsent if it is
+off. A player opt-out stops capture at once.
+
+**The trail.** Off unless your game's trail switch is on. Then a crash
+carries `rs_trail`: up to the last 20 lines your game printed, oldest first,
+each `+<ms since start> info <text>`, scrubbed and cut to 120 characters,
+1,500 in all. The SDK's own `Ravensight:` lines are never in it. The trail
+is kept in memory only and is never sent on its own.
+
+**Limits on the device.** Per launch: 30 captures, 3 for the same error
+(type, message with numbers and quoted text taken out, and first game frame),
+10 trails, and no more than 6 a minute. Past a limit the capture is dropped
+silently. Captured errors queue behind your gameplay events, so an error
+burst can never hold gameplay back, and they are the first to go when the
+queue is full. A batch the server refuses as too large (413) is split like a
+400 and the bad event dropped, never retried as is.
+
+**What is never sent.** Nothing about the machine, no file contents, no
+query strings, and nothing from the SDK's own requests or log lines.
+
+**Manual errors are unchanged.** `ravensight.error(severity, message, opts)`
+works as before, is not limited or scrubbed on the device (the server
+scrubs it) and is never blocked by the switch.
+
+**On the web.** A love.js build runs the same `love.errorhandler` hook and
+hands the crash to the page as an ordinary `track` line, which the bridge
+passes to the JavaScript SDK. The Lua side has no session answer there, so
+the page's SDK and the server apply the game's switch (an automatic error
+with capture off is dropped free on the server), and a web crash carries no
+trail. A Lua error never reaches the page as a JavaScript error, so the
+JavaScript SDK's own capture does not send it a second time. The device
+limits above still apply on the Lua side.
+
+**One visible difference.** A traceback LÖVE prints for a crash has one more
+line, the SDK's handler, between your code and LÖVE's.
+
 ## What it sends, and what it does not
 
 - **A random device id per install**: 32 hex characters, a dash and the OS
@@ -443,6 +512,8 @@ yet.
 - **The events you track**, with a timestamp, your game version and the OS,
   and an `rs_event_id` in each event's data (see "Public builds").
 - **Your `distribution` label**, if you set one.
+- **Crashes**, scrubbed on the device, unless you pass `errorCapture = false`
+  or switch capture off for the game (see "Error capture").
 - **No advertising identifier, no names, no emails, no accounts.** There is
   no field for them.
 

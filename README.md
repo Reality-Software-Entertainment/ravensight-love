@@ -601,8 +601,9 @@ On the desktop (a love.js build delivers through the page's JavaScript SDK):
   key, named by a hash of the key) whenever the queue changes: once per
   frame for events you track, at once for removals and on quit. A temporary
   file is renamed over the old one, so a partial write never replaces a good
-  file. At most 500 events are kept, oldest dropped first (an automatic
-  error is always dropped before a gameplay event), and events older
+  file. A captured error's `rs_trail` is never written to it. At most 500
+  events are kept, oldest dropped first (an automatic error is always
+  dropped before a gameplay event, and queues behind gameplay), and events older
   than 89 days are dropped when it is read. The 0.5 `ravensight_queue.json`
   is read once and removed.
 - **Removed only when delivered.** An event leaves the file only after a 2xx
@@ -624,9 +625,8 @@ On the desktop (a love.js build delivers through the page's JavaScript SDK):
   exactly the server's time, which `flush()` never cuts. A batch 401 opens a
   new session once, then waits for the backoff.
 - **Refusals.** A 400 naming one event by `index` drops that event and resends
-  the rest. `batch_too_large` and 413 halve the batch. A 400 about one event
-  with no index (such as `event_too_large`) halves until that event is alone,
-  then drops it. Any other 400 drops the request's events. A refused key (401
+  the rest. Only `batch_too_large` and 413 halve the batch. Any other 400
+  drops the request's events. A refused key (401
   or 403 on the settings check or the session, or a 403 on a batch) stops the
   SDK for the rest of the run; the queued events stay on disk for the next
   launch. So does the kill switch.

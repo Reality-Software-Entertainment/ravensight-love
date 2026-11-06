@@ -819,17 +819,30 @@ return {
   end },
   { 'error capture: the trail holds the game print lines, never the SDK lines', function()
     run(nil, nil, function(w)
-      errorWorld(w, { errorCapture = { enabled = true, trail = true } })
+      local sent = errorWorld(w, { errorCapture = { enabled = true, trail = true } })
       w.sdk.init({ ingestKey = 'gt_live_k', synchronous = true, debug = true })
       for _ = 1, 3 do w.sdk.update(0) end
       print('player ' .. 3 .. ' entered cave from 10.1.2.3')
       w.clock = 1.5
       print('Ravensight: pretending to be the SDK')
       love.errorhandler('cave.lua:9: nil')
-      local saved = savedQueue(w.files)
-      local trail = saved[#saved].data.rs_trail
-      eq(trail, '+0 info player 3 entered cave from [ip]')
       eq(w.lines[#w.lines - 1], 'player 3 entered cave from 10.1.2.3', 'print still prints, unchanged')
+      -- The trail is never written to the queue file (error queue rule 3).
+      local saved = savedQueue(w.files)
+      eq(saved[#saved].data.rs_source, 'crash')
+      eq(saved[#saved].data.rs_trail, nil, 'no trail on disk')
+      -- It is still sent from memory.
+      w.sdk.flush()
+      w.sdk.update(0)
+      local trail
+      for _, r in ipairs(sent) do
+        if r.url:find('/track/batch$') then
+          for _, e in ipairs(json.decode(r.body).events) do
+            if e.data.rs_source == 'crash' then trail = e.data.rs_trail end
+          end
+        end
+      end
+      eq(trail, '+0 info player 3 entered cave from [ip]')
     end)
   end },
   { 'error capture: the manual helper is unchanged and not scrubbed or capped', function()

@@ -58,11 +58,6 @@ Core.QUEUE_MAX_EVENTS = 500
 Core.QUEUE_MAX_AGE_MS = 89 * 86400 * 1000
 --- Request bodies of at least this many bytes are sent gzip compressed.
 Core.GZIP_MIN_BYTES = 1024
---- 400 answers about one event that carry no index: halve until it is alone.
-Core.PER_EVENT_400 = {
-  event_too_large = true, event_name_too_long = true, missing_event = true,
-  invalid_event_data = true, invalid_event_id = true,
-}
 --- Device fields on the session: each at most this many characters.
 Core.DEVICE_FIELD_MAX_CHARS = 128
 --- The largest event the API accepts, measured as the server measures it:
@@ -1021,9 +1016,8 @@ end
 ---   batch_too_large or a 413 halves the batch, and drops one event that is
 ---   still too large;
 ---   a 415 (or a 413 for one event) is resent uncompressed once, then dropped;
----   a 400 about one event with no index (event_too_large and the other
----   per-event ceilings) halves until that event is alone, then drops it;
----   any other 400 drops the request's events.
+---   any other 400 drops the request's events (only batch_too_large and a
+---   413 halve a batch).
 function Core:onBatchRefused(status, errorCode, parsed, size)
   local reason = errorCode ~= '' and errorCode or ('http_' .. tostring(status))
   local index = type(parsed) == 'table' and parsed.index
@@ -1045,7 +1039,7 @@ function Core:onBatchRefused(status, errorCode, parsed, size)
     self:countRefused(size, reason)
     return
   end
-  local halves = status == 413 or errorCode == 'batch_too_large' or (status == 400 and Core.PER_EVENT_400[errorCode])
+  local halves = status == 413 or errorCode == 'batch_too_large'
   if halves and size > 1 then
     self.splitBatchSize = math.max(1, math.floor(size / 2))
     self.log('warn', 'batch refused (' .. reason .. '), splitting to ' .. self.splitBatchSize)
@@ -1268,7 +1262,14 @@ function Core:loadSavedQueue()
   end
   self.deliveryStats.dropped_too_old = self.deliveryStats.dropped_too_old + tooOld
   for _, e in ipairs(self.pending) do loaded[#loaded + 1] = e end
-  self.pending = loaded
+  -- Gameplay goes before captured errors (nothing is in flight yet).
+  local gameplay, captures = {}, {}
+  for _, e in ipairs(loaded) do
+    local list = Errors.isAutomatic(e.data) and captures or gameplay
+    list[#list + 1] = e
+  end
+  for _, e in ipairs(captures) do gameplay[#gameplay + 1] = e end
+  self.pending = gameplay
   self:trimQueue()
   if #self.pending > 0 and not self.firstQueuedAt then self.firstQueuedAt = self.now() end
   self:saveQueue()
@@ -1298,7 +1299,13 @@ function Core:saveQueue(stopping)
       last = session
     end
     local events = groups[#groups].events
-    events[#events + 1] = { event = e.event, timestamp = e.timestamp, data = e.data }
+    local data = e.data
+    if type(data) == 'table' and data.rs_trail ~= nil then
+      -- A capture's trail is never written to the queue file.
+      data = {}
+      for k, v in pairs(e.data) do if k ~= 'rs_trail' then data[k] = v end end
+    end
+    events[#events + 1] = { event = e.event, timestamp = e.timestamp, data = data }
   end
   local text = json.encode({ version = Core.QUEUE_FORMAT_VERSION, groups = groups })
   local replace = self.storage.replace or self.storage.write

@@ -350,6 +350,57 @@ return {
     h.answer('/track/batch', 413)
     eq(h.names(h.requests[1].req), 'e1')
   end },
+  -- ------------------------------------------- error queue rules (all SDKs)
+  { 'error rule 1: gameplay, a game error included, goes before captures, also after a load', function()
+    local cap = { rs_kind = 'error', rs_severity = 'error', rs_message = 'x', rs_source = 'uncaught' }
+    local h = harness()
+    h.core:start()
+    h.core:track('a', {})
+    h.core:track('capture', cap)
+    h.core:track('own_error', { rs_kind = 'error', rs_severity = 'error', rs_message = 'game', rs_source = 'manual' })
+    h.core:track('b', {})
+    eq(h.pendingNames(), 'a,own_error,b,capture')
+    local files = { [Core.queueFile(KEY)] = json.encode({ version = 2, groups = { { events = {
+      { event = 'old_capture', timestamp = 1800000000000 - 10, data = cap },
+      { event = 'old_play', timestamp = 1800000000000 - 5, data = {} } } } } }) }
+    local two = harness({ files = files })
+    two.boot()
+    eq(two.names(two.requests[1].req), 'old_play,game_started,old_capture', 'gameplay before captures within the flush')
+  end },
+  { 'error rule 2: a capture evicts the oldest capture, never gameplay', function()
+    local cap = function(m) return { rs_kind = 'error', rs_severity = 'error', rs_message = m, rs_source = 'log' } end
+    local h = harness()
+    h.core.maxQueueSize = 3
+    h.core:track('a', {})
+    h.core:track('c1', cap('1'))
+    h.core:track('c2', cap('2'))
+    h.core:track('c3', cap('3'))
+    eq(h.pendingNames(), 'a,c2,c3', 'the oldest capture went')
+    h.core:track('b', {})
+    h.core:track('c', {})
+    eq(h.pendingNames(), 'a,b,c', 'gameplay as before, captures first')
+    h.core:track('c4', cap('4'))
+    eq(h.pendingNames(), 'a,b,c', 'with no capture queued the incoming capture is dropped')
+  end },
+  { 'error rule 3: rs_trail never reaches the queue file; opt-out and reset delete persisted captures', function()
+    local h = harness()
+    h.boot()
+    h.core:track('capture', { rs_kind = 'error', rs_severity = 'error', rs_message = 'x', rs_source = 'crash', rs_trail = '+0 info entered cave' })
+    h.core:update()
+    local text = h.files[Core.queueFile(KEY)]
+    assert(text:find('"capture"'), 'the capture is persisted')
+    assert(not text:find('rs_trail') and not text:find('entered cave'), 'its trail is not')
+    eq(h.core.pending[#h.core.pending].data.rs_trail, '+0 info entered cave', 'the trail stays in memory')
+    h.core:setTrackingEnabled(false)
+    eq(h.files[Core.queueFile(KEY)], nil, 'opt-out deletes persisted captures')
+    local r = harness()
+    r.boot()
+    r.core:track('capture', { rs_kind = 'error', rs_severity = 'error', rs_message = 'x', rs_source = 'crash' })
+    r.core:update()
+    assert(r.files[Core.queueFile(KEY)])
+    r.core:resetDeviceId()
+    eq(r.files[Core.queueFile(KEY)], nil, 'a device id reset deletes persisted captures')
+  end },
   -- ---------------------------------------------------- ads and attribution
   { 'trackAdRevenue sends exactly the seven keys, micros as a digit string', function()
     local name, props = Typed.ad('admob', 'rewarded', 'shown', { placement = 'level_end', revenueMicros = '1500', currency = 'USD' })

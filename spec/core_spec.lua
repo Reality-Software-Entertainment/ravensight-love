@@ -204,17 +204,19 @@ return {
     eq(h.core.retryAt, 42)
     eq(h.fired('flush_failed')[2], 'rate_limited')
   end },
-  { 'a rejected batch is halved until the one bad event is dropped', function()
+  { 'a batch_too_large batch is halved until the one bad event is dropped; another 400 drops the request', function()
     local h = harness()
     h.boot()
     for i = 1, 3 do h.core:track('e' .. i, {}) end
     h.openSession()
-    h.answer('/api/v1/track/batch', 400, { error = 'event_too_large' })
-    eq(#h.batchBody(h.answer('/api/v1/track/batch', 400, { error = 'event_too_large' })), 2)
-    eq(#h.batchBody(h.answer('/api/v1/track/batch', 400, { error = 'event_too_large' })), 1)
+    h.answer('/api/v1/track/batch', 400, { error = 'batch_too_large' })
+    eq(#h.batchBody(h.answer('/api/v1/track/batch', 400, { error = 'batch_too_large' })), 2)
+    eq(#h.batchBody(h.answer('/api/v1/track/batch', 400, { error = 'batch_too_large' })), 1)
     -- game_started was the bad one; the other three survive.
     eq(#h.core.pending, 3)
     eq(h.core.pending[1].event, 'e1')
+    local n = #h.batchBody(h.answer('/api/v1/track/batch', 400, { error = 'event_too_large' }))
+    eq(#h.core.pending, 3 - n, 'only batch_too_large and 413 halve: another 400 drops the whole request')
   end },
   { 'a 401 opens a new session and keeps the queue', function()
     local h = harness()

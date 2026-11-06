@@ -64,6 +64,22 @@ return {
       eq(Errors.scrub(case.out), case.out, case.name .. ' (idempotent)')
     end
   end },
+  { 'input is cut to 4 times the limit before the scrub, so 200,000 characters scrub fast', function()
+    local big = string.rep('ab:cd 1.2.3.4 x@y.co ', 10000) -- over 200,000 characters
+    assert(#big >= 200000)
+    local started = os.clock()
+    local e = Errors.new({ now = function() return 0 end })
+    local data = e:capture({ source = 'crash', message = big, stack = big, trail = true })
+    e:record('info', big)
+    eq(#data.rs_message <= 200, true); eq(#data.rs_stack <= 2000, true)
+    assert(data.rs_message:find('[ip]', 1, true))
+    eq(#Errors.scrubField(big, 200), 200)
+    assert(os.clock() - started < 0.5, 'took ' .. (os.clock() - started) .. ' s')
+  end },
+  { 'URLs lose user:password@ and an IPv6 match needs a digit', function()
+    eq(Errors.scrub('https://bob:hunter2@host.example/p?q=1'), 'https://host.example/p')
+    eq(Errors.scrub('Face::Add and fe80::1'), 'Face::Add and [ip]')
+  end },
   { 'a path keeps its file, a secret with slashes does not', function()
     local path = 'res://addons/inventory_system2/ui/inventory_slot.gd:12'
     eq(Errors.scrub(path), path)

@@ -197,11 +197,17 @@ function Errors.new(deps)
   return self
 end
 
+--- Scrubs a field: cut to 4 times its limit before the scrub (some rules
+--- cost more on long input) and to the limit after.
+function Errors.scrubField(text, limit)
+  return cut(Errors.scrub(cut(text, limit * 4)), limit)
+end
+
 --- Adds one line to the trail ring, scrubbed and cut, oldest dropped first.
 function Errors:record(level, text)
   local ms = math.max(0, math.floor((self.now() - self.startedAt) * 1000))
-  local body = Errors.scrub((tostring(text or ''):gsub('[\r\n\t]+', ' ')))
-  local line = cut('+' .. ms .. ' ' .. tostring(level) .. ' ' .. body, Errors.TRAIL_LINE_CHARS)
+  local raw = cut(tostring(text or ''), Errors.TRAIL_LINE_CHARS * 4):gsub('[\r\n\t]+', ' ')
+  local line = cut('+' .. ms .. ' ' .. tostring(level) .. ' ' .. Errors.scrub(raw), Errors.TRAIL_LINE_CHARS)
   self.ring[#self.ring + 1] = line
   while #self.ring > Errors.TRAIL_LINES do table.remove(self.ring, 1) end
 end
@@ -233,8 +239,8 @@ end
 --- drops it. opts: source, severity, message, stack, errorType, trail (true
 --- when the game's trail switch is on).
 function Errors:capture(opts)
-  local message = cut(Errors.scrub(tostring(opts.message or '')), Errors.MESSAGE_CHARS)
-  local stack = opts.stack and cut(Errors.scrub(tostring(opts.stack)), Errors.STACK_CHARS) or nil
+  local message = Errors.scrubField(tostring(opts.message or ''), Errors.MESSAGE_CHARS)
+  local stack = opts.stack and Errors.scrubField(tostring(opts.stack), Errors.STACK_CHARS) or nil
   local errorType = opts.errorType and cut(tostring(opts.errorType), Errors.TYPE_CHARS) or nil
   local frame = Errors.firstFrame(stack) or Errors.firstFrame(message) or ''
   local key = (errorType or '') .. '|' .. Errors.template(message) .. '|' .. frame

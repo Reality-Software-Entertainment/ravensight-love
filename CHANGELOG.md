@@ -1,10 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.7.0 - 2026-11-06
 
-Held until the Ravensight server release that accepts origins, signatures,
-gzip bodies and the ad and attribution keys is deployed. The version is set
-at release.
+Needs a Ravensight server that accepts origins, signatures, gzip bodies,
+`rs_exposure` and the `rs_ad_*` and `rs_attr_*` keys; the hosted service at
+ravensight.io runs one.
 
 ### Breaking
 

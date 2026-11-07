@@ -108,6 +108,7 @@ needs in a web build:
 | 0.2.0 | `web/ravensight-love-bridge.js` | 0.4.0 | The bridge calls `rs.track`, `rs.submitFeedback`, `rs.setEnabled`, `rs.flush` and `rs.init`, all present in 0.4.0. 0.4.0 is the floor because the Lua SDK sends no `game_started` or `game_exited` on the web, and the JavaScript SDK sends them itself only from 0.4.0 (`autoEvents`). 0.4.0 also makes `init()` on an opted-out client open no session, which the remembered opt-out relies on. |
 | 0.3.0 | `web/ravensight-love-bridge.js` | 0.4.0 | No new call on the page's SDK is required. After the exit mailbox, the bridge calls `rs.flushOnHidden()` if it exists, else `rs._flushOnHidden()`, else `rs.flush()`. ravensight-js 0.4.x has the internal `_flushOnHidden` and no public `flushOnHidden` yet, so on 0.4.x the bridge calls `_flushOnHidden`. An opt-in page constructs its SDK with `enabled: false` and the bridge calls `rs.init()` on the player's yes, which 0.4.0 already supports. |
 | 0.4.0 | `web/ravensight-love-bridge.js` | 0.4.0 | The bridge also keeps the latest `health` line and tracks it once on `pagehide`, using `rs.track` only. Nothing new is required of the page's SDK. |
+| 0.7.0 | `web/ravensight-love-bridge.js` | 0.5.1 | The bridge passes the game's first config read after each config answer to `rs.getConfig`, so the page SDK counts the experiment exposure. A page SDK with no `getConfig` is skipped. Delivery (saved queue, origins, compression, signing) on the web is the page SDK's. |
 
 Nothing in ravensight-love 0.2.0, 0.3.0 or 0.4.0 needs the 0.4.1 additions (`rs.session()`
 and `rs.sessionTokenFor()`), so 0.4.0 or newer is enough. The bridge does not
@@ -339,6 +340,11 @@ end
 | `resource(flow, resource, amount, opts)` | A resource entering (`"source"`) or leaving (`"sink"`) the economy. |
 | `progression(status, p1, opts)` | A progression step: `"start"`, `"complete"` or `"fail"`. |
 | `error(severity, message, opts)` | An error or warning, with an optional stack. |
+| `trackAd(network, format, result, opts)` | An ad lifecycle step. Returns `true`, or `false` and the reason when a field is malformed (nothing is sent). See "Ads and attribution". |
+| `trackAdRevenue(network, format, placement, revenueMicros, currency, opts)` | A paid impression (`result` `shown`). |
+| `microsFromDecimalString(text)`, `microsFromRevenue(number)` | Revenue in micros as a digit string, without multiplying a float. |
+| `setAttribution(attribution)` | Where this install was acquired, sent once per install. |
+| `getDeliveryStats()` | Desktop: events let go of since launch, `dropped_overflow`, `dropped_too_old`, `dropped_refused`. |
 | `flush()` | Send what is queued now instead of waiting for the timer. |
 | `submitFeedback(message, category, rating)` | Send player feedback. `category` is optional and one of `bug`, `suggestion`, `complaint`, `praise`, `playtest` or `other`; `rating` is optional and a whole number from 1 to 5. Needs an open session. Returns `true` when sent, or `false` and a reason (`"invalid_category"`, `"invalid_rating"`, `"no_session"`, `"empty_message"`, `"tracking_disabled"`, or `"not_started"` before `init`, with `enabled = false` or while inert) when refused before sending. |
 | `setTrackingEnabled(enabled)` | The player's choice, remembered across launches. `false` drops the queue and sends nothing, not even the startup check. With `consent = "opt_in"`, `true` is the yes that starts everything. |
@@ -523,6 +529,10 @@ line, the SDK's handler, between your code and LÖVE's.
 - **Your `distribution` label**, if you set one.
 - **Crashes**, scrubbed on the device, unless you pass `errorCapture = false`
   or switch capture off for the game (see "Error capture").
+- **The GPU name** on the session (`device.gpu`, the device name from
+  `love.graphics.getRendererInfo()`), at most 128 printable characters. LÖVE
+  reports no device model or OS version, so none is sent. It is not a
+  hardware identifier. Country is never sent by the SDK.
 - **No advertising identifier, no names, no emails, no accounts.** There is
   no field for them.
 
@@ -576,28 +586,95 @@ launch. `getTransport()` tells you which one is in use.
 
 ## Delivery
 
+On the desktop (a love.js build delivers through the page's JavaScript SDK):
+
 - The session opens once the startup settings check is answered. Events
   tracked while it is out are queued, and the answer (or its timeout)
   opens the session. A timeout or a server error still counts as tracking
   on; only an explicit "off" stops it.
 - Events are batched: a request goes out 2 seconds (`flushInterval`) after
   the first waiting event, or at once when 50 are waiting, on `flush()`, on
-  quit, and when a session opens with events waiting. With `debug = true`
-  each accepted batch prints `events_flushed N`.
-- Up to 50 events per request.
-- A failed request is retried after 10 seconds, doubling up to 5 minutes,
-  each wait plus or minus 20 percent. A "slow down" answer from the server
-  is obeyed exactly.
-- A refused key (401 or 403 on the settings check or the session) stops the
-  SDK for the rest of the run instead of retrying.
+  quit, and when a session opens with events waiting. Up to 50 events per
+  request. With `debug = true` each accepted batch prints `events_flushed N`.
+- **Saved queue.** Unsent events are written to
+  `ravensight/queue-<16 hex>.json` in the save folder (one file per ingest
+  key, named by a hash of the key) whenever the queue changes: once per
+  frame for events you track, at once for removals and on quit. A temporary
+  file is renamed over the old one, so a partial write never replaces a good
+  file. A captured error's `rs_trail` is never written to it. At most 500
+  events are kept, oldest dropped first (an automatic error is always
+  dropped before a gameplay event, and queues behind gameplay), and events older
+  than 89 days are dropped when it is read. The 0.5 `ravensight_queue.json`
+  is read once and removed.
+- **Device backups.** The file holds origin stamps and scrubbed error
+  captures, so it stays out of backups. On macOS the SDK marks it excluded
+  from Time Machine itself, on every write and on a file it reads at start;
+  a failed call is retried once, then logs one warning (never the file's
+  contents) and the queue is still written. LÖVE gives Lua no way to do this on mobile, so
+  the game does it:
+  - **Android:** the save folder is in the app's internal files, which Auto
+    Backup copies. Turn backup off (`android:allowBackup="false"`) or add a
+    backup rules file that excludes the save folder's `ravensight/`
+    subfolder, in both `full-backup-content` and `data-extraction-rules`.
+  - **iOS:** set `NSURLIsExcludedFromBackupKey` on the save folder's
+    `ravensight/` subfolder from the app's native code.
+  - Windows and Linux have no common way to say it; nothing is done there.
+- **Removed only when delivered.** An event leaves the file only after a 2xx
+  answer, or a 400 that refuses it, and that removal is saved first.
+- **Origin.** Each session's events are saved with the session answer's
+  `origin`, and a later launch sends them with it, so the server files them
+  under the session, build and platform they happened in. The origin's
+  `stamp` is a credential for that old session, kept only in the queue file.
+- **Compression.** A request body of 1,024 bytes or more is sent gzip
+  compressed (`love.data.compress`). A 415 (or a 413 for one event) is sent
+  once more uncompressed.
+- **Signing.** When the session answer has `signing` (public keys), every
+  batch carries `X-Ravensight-Timestamp` and an HMAC-SHA256
+  `X-Ravensight-Signature` over the uncompressed body, with the clock
+  corrected by the server's time. The secret stays in memory.
+- **Retries.** A failed request is retried after 10 seconds, doubling up to
+  5 minutes, each wait multiplied by a random factor from 0.5 up to 1;
+  `flush()` cuts that wait short. A 429, or a 503 with Retry-After, waits
+  exactly the server's time, which `flush()` never cuts. A batch 401 opens a
+  new session once, then waits for the backoff.
+- **Refusals.** A 400 naming one event by `index` drops that event and resends
+  the rest. Only `batch_too_large` and 413 halve the batch. Any other 400
+  drops the request's events. A refused key (401
+  or 403 on the settings check or the session, or a 403 on a batch) stops the
+  SDK for the rest of the run; the queued events stay on disk for the next
+  launch. So does the kill switch.
 - An event whose data is over 8,192 bytes as JSON is dropped before it is
   queued.
-- If the server rejects one oversized event, the batch is split until that
-  event is found and dropped, so it never costs the events around it.
-- Events still unsent when the game quits are saved and sent on the next
-  launch.
-- If tracking is switched off for your game in the dashboard, the SDK goes
-  quiet for the rest of the run.
+- Turning tracking off as the player, or `resetDeviceId()`, deletes the saved
+  queue.
+
+## Ads and attribution
+
+```lua
+-- A paid impression. Revenue is MICROS as a digit string: 0.0015 USD is "1500".
+ravensight.trackAdRevenue('admob', 'rewarded', 'level_end', '1500', 'USD')
+ravensight.trackAdRevenue('applovin', 'interstitial', nil, ravensight.microsFromRevenue(revenue), 'USD')
+-- Clicks, rewards and failures carry no revenue.
+ravensight.trackAd('applovin', 'rewarded', 'rewarded', { placement = 'shop' })
+-- Where this install came from, once per install.
+ravensight.setAttribution({ source = 'store_referrer', campaign = 'spring' })
+```
+
+`format` is one of `banner`, `interstitial`, `rewarded`, `native`,
+`app_open`, `other`; `result` one of `shown`, `clicked`, `failed`,
+`rewarded`. Revenue goes on `shown` only, always with a three letter
+currency, never converted, and never as a fraction:
+`microsFromRevenue` formats the number to 6 decimals and
+`microsFromDecimalString` rounds half up on the digits. A malformed call
+returns `false` and a reason and sends nothing. The events are `rs_ad` and
+`rs_attribution` unless you pass `name`.
+
+`setAttribution` takes `source` (`utm`, `store_referrer`, `organic` or a
+partner name), `network`, `campaign`, `adset`, `creative` and `touchTime`
+(epoch milliseconds). A flag in the save folder (`ravensight_attribution`)
+stops later calls; `resetDeviceId()` clears it. Pass `getDeviceId()` to an
+attribution partner as its customer user id so its install callback names
+this device.
 
 ## Playtest
 
@@ -652,15 +729,22 @@ valid document. The single persistent cache is scoped to endpoint, key, player,
 platform and build; playtests never persist it. Consent changes and identity
 resets discard late responses. Keep safe defaults in the game.
 
-Active experiments add `rs_exp_<key>` to newly tracked events, including typed
-helpers. Events queued before config arrives retain their original properties.
+A fetch alone exposes nothing. The first `getConfig` read in a session marks
+every running experiment in the config as exposed: from then on every event
+queued carries `rs_exp_<key> = <variant>`, and one `rs_exposure` event is
+sent at that moment. A new launch starts untagged until its own first read.
+An experiment gone from a later fetch is no longer tagged. A well-formed
+`rs_exp_<key>` your game sets itself is left alone. Tags are added when an
+event is queued, so an event sent later from the saved queue keeps its
+variant.
 Fresh config responses consume one ordinary event; unchanged ETags are free.
 
 For love.js, use JavaScript SDK 0.5.1 or newer and the matching bridge. Expose
 `Module.FS` with `readFile` and `writeFile` on the page. The bridge returns public
 config through `/tmp/ravensight-config.json` inside the game's virtual filesystem;
 `ravensight.update` reads replies bound to its request ID. The first update asks
-for config. The JavaScript SDK owns caching, consent and event exposure labels.
+for config. The JavaScript SDK owns caching, consent and event exposure labels;
+the game's first config read after each answer is passed to its `getConfig`.
 A missing/older bridge falls back after six seconds, with no remote values.
 
 ### Player Reports with an explicit screenshot

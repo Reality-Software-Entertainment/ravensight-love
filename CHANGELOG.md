@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.7.0 - 2026-11-06
+
+Needs a Ravensight server that accepts origins, signatures, gzip bodies,
+`rs_exposure` and the `rs_ad_*` and `rs_attr_*` keys; the hosted service at
+ravensight.io runs one.
+
+### Breaking
+
+- Experiment tags follow the exposure contract: `rs_exp_<key>` only after the game's first `getConfig` read in a session, with one `rs_exposure` event; a well-formed tag the game sets is left alone.
+- The saved queue moved to `ravensight/queue-<hash>.json`, format version 2, written whenever it changes instead of only at quit. The 0.5 file is read once and removed.
+- A refused key or the kill switch keeps the queued events on disk for the next launch.
+- Backoff waits are multiplied by a random factor from 0.5 up to 1 (was plus or minus 20 percent). A batch 401 opens a new session once, then waits.
+- Only `400 batch_too_large` and 413 halve a batch. Any other 400 without an `index` (such as `event_too_large`) drops that request's events instead of halving.
+
+### Added
+
+- Each session's `origin` is saved with its events and sent on every event a later session delivers.
+- gzip for request bodies of 1,024 bytes or more; a 415, or a 413 for one compressed event, is resent uncompressed once (a 413 for one uncompressed event is dropped, as in 0.6.0).
+- Request signing when the session answer has `signing`, with HMAC-SHA256 in `ravensight/hmac.lua` (LÖVE's `love.data.hash` where available) and the clock corrected by `serverTime`.
+- The shared error queue rules: gameplay events (a game's own `error()` included) go before captured errors, also after the queue is read from disk; a capture evicts only the oldest capture, never a gameplay event; `rs_trail` is never written to the queue file; opting out or resetting the id deletes persisted captures. Saved crashes older than 30 days are still deleted unsent, and held boot errors keep their crash time in milliseconds. Nothing in the batch in flight is ever evicted: with nothing else to make room, the incoming event is dropped.
+- The queue file is excluded from Time Machine on macOS, on every write and on a file read at start; a failed call is retried once, then logs one warning with no file contents. The README says how to keep it out of Android and iOS backups.
+- Opt-out, a device id reset and an emptied queue also delete a temporary file a write left behind; a failed rename deletes its temporary file.
+- The local 8 KB check counts an error event's `rs_message`, `rs_stack` and `rs_trail` (within 200, 2,000 and 1,500 characters) one byte a character, as the server does.
+- A 400 with `index` drops only that event; `batch_too_large` and 413 halve; a 503 with Retry-After waits like a 429; `flush()` cuts a backoff wait but never a Retry-After.
+- `trackAd`, `trackAdRevenue`, `microsFromDecimalString`, `microsFromRevenue`, `setAttribution` (once per install) and `getDeliveryStats`.
+- The GPU name on the session (`device.gpu`).
+- The love.js bridge passes the first config read after each answer to the page SDK's `getConfig`.
+
+### Changed
+
+- Event timestamps are unix milliseconds on native builds, so events in one
+  second keep their order in funnels and sessions. `os.time` has no fraction,
+  so the clock is the wall clock lined up with `love.timer`; it can read up to
+  a second early and only moves forward. Needs a Ravensight server that keeps
+  milliseconds. Older versions keep working unchanged, and a queue saved by an
+  older version is sent as it was recorded. love.js builds take their stamp from
+  the JavaScript SDK on the page, so they need ravensight-js with milliseconds.
+
 ## 0.6.0 - 2026-11-06
 
 - Automatic error capture, on by default: `love.errorhandler` is wrapped and

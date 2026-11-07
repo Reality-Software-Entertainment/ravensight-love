@@ -8,7 +8,9 @@ local function make(files)
   local h = { files = files or {}, requests = {}, ready = {} }
   h.core = Core.new({ apiUrl = 'https://api.test', ingestKey = 'public', platform = 'web', gameVersion = '1', randomHex = function(n) return string.rep('a', n*2) end,
     storage = { read = function(k) return h.files[k] end, write = function(k,v) h.files[k] = v end, remove = function(k) h.files[k] = nil end },
-    send = function(req, cb) table.insert(h.requests, {req=req,cb=cb}) end })
+    -- Only config requests are answered here; a session an rs_exposure
+    -- event would open is not part of these cases.
+    send = function(req, cb) if req.url:find('/ingest/config', 1, true) then table.insert(h.requests, {req=req,cb=cb}) end end })
   h.core.deviceId = 'player'
   h.core:on('config_ready', function(source) table.insert(h.ready, source) end)
   function h.answer(status, body)
@@ -33,7 +35,8 @@ return {
     eq(h.ready[1],'network'); eq(h.core:getConfig('speed',0),3); eq(h.core:getConfig('hints',true),false)
     eq(h.core:getConfig('speed','fallback'),'fallback'); eq(h.core:getConfig('missing',8),8)
     h.core:getConfig('rules',{}).bonus = 99; eq(h.core:getConfig('rules',{}).bonus,2)
-    local event = h.core:enqueue('x', {rs_exp_difficulty='forged'}); eq(event.rs_exp_difficulty,'easy')
+    local event = h.core:enqueue('x', {rs_exp_difficulty='forged'}); eq(event.rs_exp_difficulty,'forged')
+    eq(h.core:enqueue('x', {rs_exp_difficulty='Not Valid!'}).rs_exp_difficulty,'easy')
     h.core:fetchConfig(); req = h.answer(304); eq(req.headers['If-None-Match'],doc().etag); eq(h.ready[2],'cache')
     h.core:fetchConfig(); h.answer(0); eq(h.core:getConfig('speed',0),3)
     local empty = doc(); empty.values={}; empty.experiments={}; h.core:fetchConfig(); h.answer(200,empty)

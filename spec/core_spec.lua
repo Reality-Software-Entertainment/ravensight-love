@@ -33,8 +33,11 @@ local function harness(opts)
     playtest = opts.playtest,
     consent = opts.consent,
     distribution = opts.distribution,
-    -- 0.5 is no jitter at all, so the timing tests read exact numbers.
-    random = opts.random or function() return 0.5 end,
+    -- 1 is a jitter factor of exactly 1, so the timing tests read exact
+    -- numbers (a real random() is below 1, so the factor is too).
+    random = opts.random or function() return 1 end,
+    gzip = opts.gzip,
+    device = opts.device,
   })
   for _, name in ipairs({ 'session_ready', 'session_failed', 'tracking_disabled', 'events_flushed', 'flush_failed', 'feedback_submitted', 'feedback_failed' }) do
     h.core:on(name, function(...) table.insert(h.events, { name, ... }) end)
@@ -55,6 +58,16 @@ local function harness(opts)
     return h.answer('/api/v1/session', 201, { token = 'ses_1', expiresIn = 3600 })
   end
   function h.batchBody(req) return json.decode(req.body).events end
+  --- The saved queue's events in order, or nil when there is no file.
+  function h.saved(files)
+    local text = (files or h.files)[Core.queueFile('gt_live_k')]
+    if not text then return nil end
+    local out = {}
+    for _, g in ipairs(json.decode(text).groups) do
+      for _, e in ipairs(g.events) do out[#out + 1] = e end
+    end
+    return out
+  end
   function h.fired(name)
     for _, e in ipairs(h.events) do if e[1] == name then return e end end
   end
@@ -83,9 +96,43 @@ return {
     assert(h.fired('session_ready'))
     local batch = h.answer('/api/v1/track/batch', 202)
     eq(h.batchBody(batch)[1].event, 'game_started')
-    eq(h.batchBody(batch)[1].timestamp, 1800000000)
+    eq(h.batchBody(batch)[1].timestamp, 1800000000000)
     eq(batch.headers['X-Session-Token'], 'ses_1')
     eq(h.fired('events_flushed')[2], 1)
+  end },
+  { 'two events in one second keep their milliseconds, in order, in the sent JSON', function()
+    local h = harness()
+    h.boot()
+    h.clock = 0.25
+    h.core:track('first')
+    h.clock = 0.7
+    h.core:track('second')
+    h.openSession()
+    local batch = h.answer('/api/v1/track/batch', 202)
+    local stamps = {}
+    for _, e in ipairs(h.batchBody(batch)) do stamps[e.event] = e.timestamp end
+    eq(stamps.first, 1800000000250)
+    eq(stamps.second, 1800000000700)
+    assert(batch.body:find('1800000000700', 1, true), 'the number is written out whole: ' .. batch.body)
+  end },
+  { 'the millisecond clock lines up again when the wall clock jumps', function()
+    local wall, monotonic = 1800000000, 5
+    local clock = Core.wallClockMs(function() return wall end, function() return monotonic end)
+    eq(clock(), 1800000000000)
+    monotonic = 5.5
+    eq(clock(), 1800000000500)
+    wall, monotonic = 1800003600, 6
+    eq(clock(), 1800003600000)
+  end },
+  { 'a queue saved in seconds by an older version is sent as it was recorded', function()
+    local h = harness({ files = { [Core.QUEUE_FILE] = '[{"event":"old","data":{},"timestamp":1799999000}]' } })
+    h.boot()
+    h.openSession()
+    local batch = h.answer('/api/v1/track/batch', 202)
+    local stamps = {}
+    for _, e in ipairs(h.batchBody(batch)) do stamps[e.event] = e.timestamp end
+    eq(stamps.old, 1799999000)
+    assert(stamps.game_started > 1e11, 'and the new events are in milliseconds')
   end },
   { 'the server kill switch stops everything and says so', function()
     local h = harness()
@@ -157,17 +204,19 @@ return {
     eq(h.core.retryAt, 42)
     eq(h.fired('flush_failed')[2], 'rate_limited')
   end },
-  { 'a rejected batch is halved until the one bad event is dropped', function()
+  { 'a batch_too_large batch is halved until the one bad event is dropped; another 400 drops the request', function()
     local h = harness()
     h.boot()
     for i = 1, 3 do h.core:track('e' .. i, {}) end
     h.openSession()
-    h.answer('/api/v1/track/batch', 400, { error = 'event_too_large' })
-    eq(#h.batchBody(h.answer('/api/v1/track/batch', 400, { error = 'event_too_large' })), 2)
-    eq(#h.batchBody(h.answer('/api/v1/track/batch', 400, { error = 'event_too_large' })), 1)
+    h.answer('/api/v1/track/batch', 400, { error = 'batch_too_large' })
+    eq(#h.batchBody(h.answer('/api/v1/track/batch', 400, { error = 'batch_too_large' })), 2)
+    eq(#h.batchBody(h.answer('/api/v1/track/batch', 400, { error = 'batch_too_large' })), 1)
     -- game_started was the bad one; the other three survive.
     eq(#h.core.pending, 3)
     eq(h.core.pending[1].event, 'e1')
+    local n = #h.batchBody(h.answer('/api/v1/track/batch', 400, { error = 'event_too_large' }))
+    eq(#h.core.pending, 3 - n, 'only batch_too_large and 413 halve: another 400 drops the whole request')
   end },
   { 'a 401 opens a new session and keeps the queue', function()
     local h = harness()
@@ -249,7 +298,7 @@ return {
     eq(h.core.quitReady, false)
     eq(h.batchBody(h.answer('/api/v1/track/batch', 202))[1].event, 'game_exited')
     eq(h.core.quitReady, true)
-    eq(h.files[Core.QUEUE_FILE], nil)
+    eq(h.saved(), nil)
   end },
   { 'quitting gives up after 1.5 seconds and saves what was not sent', function()
     local h = harness()
@@ -260,7 +309,7 @@ return {
     h.core:beginQuit()
     h.clock = 1.6; h.core:update()
     eq(h.core.quitReady, true)
-    local saved = json.decode(h.files[Core.QUEUE_FILE])
+    local saved = h.saved()
     eq(saved[#saved].event, 'game_exited')
   end },
   { 'quitting offline quits at once and the next launch sends the saved events', function()
@@ -270,14 +319,15 @@ return {
     h.core:track('offline_play', {})
     h.answer('/api/v1/session', 0)
     eq(h.core:beginQuit(), false)
-    assert(h.files[Core.QUEUE_FILE])
+    assert(h.saved())
     local next = harness({ files = h.files })
     next.boot()
-    eq(next.files[Core.QUEUE_FILE], nil)
+    assert(next.saved(), 'the file stays until the events are delivered')
     next.openSession()
     local names = {}
     for _, e in ipairs(next.batchBody(next.answer('/api/v1/track/batch', 202))) do names[#names + 1] = e.event end
     eq(table.concat(names, ','), 'game_started,offline_play,game_exited,game_started')
+    eq(next.saved(), nil, 'delivered, so the file is gone')
   end },
   { 'feedback needs a session, and says why when it fails', function()
     local h = harness()
@@ -504,8 +554,8 @@ return {
 
   -- ---------------------------------------------- 0.3.0: a refused key
 
-  { 'a 401 on settings ends the run: no session, no retry, nothing saved', function()
-    local h = harness({ files = { [Core.QUEUE_FILE] = '[{"event":"old","data":{},"timestamp":1}]' } })
+  { 'a 401 on settings ends the run: no session, no retry, the queue kept for the next launch', function()
+    local h = harness({ files = { [Core.QUEUE_FILE] = '[{"event":"old","data":{},"timestamp":1799999000000}]' } })
     h.core:start()
     eq(#h.core.pending, 1, 'the saved queue was loaded')
     h.answer('/api/v1/settings', 401, { error = 'invalid_api_key' })
@@ -517,7 +567,8 @@ return {
     for t = 1, 400, 10 do h.clock = t; h.core:update() end
     eq(#h.requests, 0, 'never retried')
     eq(h.core:beginQuit(), false)
-    eq(h.files[Core.QUEUE_FILE], nil, 'nothing saved on quit')
+    eq(#h.saved(), 1, 'the queued event stays on disk')
+    eq(h.saved()[1].event, 'old', 'and nothing tracked after the refusal is added')
     local logged = 0
     for _, line in ipairs(h.logs) do if line:find('ingest key was refused', 1, true) then logged = logged + 1 end end
     eq(logged, 1, 'logged once')
@@ -570,20 +621,20 @@ return {
     eq(h.core:beginQuit(), true)
     h.answer('/api/v1/session', 401)
     eq(h.core.quitReady, true)
-    eq(h.files[Core.QUEUE_FILE], nil)
+    eq(#h.saved(), 3, 'the queued events stay on disk for the next launch')
   end },
 
   -- --------------------------------------------------- 0.3.0: jitter
 
-  { 'backoff carries plus or minus 20 percent jitter from deps.random', function()
+  { 'backoff is multiplied by a factor from 0.5 up to 1 from deps.random', function()
     local low = harness({ random = function() return 0 end })
     low.boot(); low.openSession()
     low.answer('/api/v1/track/batch', 500)
-    eq(low.core.retryAt, 8)
-    local high = harness({ random = function() return 1 end })
+    eq(low.core.retryAt, 5)
+    local high = harness({ random = function() return 0.999 end })
     high.boot(); high.openSession()
     high.answer('/api/v1/track/batch', 500)
-    assert(math.abs(high.core.retryAt - 12) < 1e-9, 'expected 12, got ' .. high.core.retryAt)
+    assert(math.abs(high.core.retryAt - 9.995) < 1e-9, 'expected 9.995, got ' .. high.core.retryAt)
   end },
   { 'jitter never takes a wait past 5 minutes or under half a second', function()
     local h = harness({ random = function() return 1 end })
@@ -628,7 +679,7 @@ return {
     h.answer('/api/v1/session', 0)
     h.core:beginQuit()
     local ids = {}
-    for _, e in ipairs(json.decode(h.files[Core.QUEUE_FILE])) do ids[e.event] = e.data.rs_event_id end
+    for _, e in ipairs(h.saved()) do ids[e.event] = e.data.rs_event_id end
     assert(ids.offline, 'saved with its id')
     local next = harness({ files = h.files })
     next.core.randomHex = function(n) return string.rep('cd', n) end   -- another launch, another nonce

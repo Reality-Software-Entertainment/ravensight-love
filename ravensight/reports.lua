@@ -2,19 +2,13 @@
 local prefix = (...):gsub('reports$', '')
 local json = require(prefix .. 'json')
 local Reports = {}
+-- The storage host the API signs uploads for; moves to files.ravensight.io.
+local STORAGE_HOST = '^https://[%w%.%-]+%.s3[%w%.%-]*%.amazonaws%.com/?$'
 local categories = {bug=true,suggestion=true,complaint=true,praise=true,playtest=true,other=true}
 local function validPng(png)
   if type(png) ~= 'string' or #png < 33 or #png > 1000000 or png:sub(1,8) ~= '\137PNG\r\n\26\n' or png:sub(13,16) ~= 'IHDR' then return false end
   local function number(at) local a,b,c,d=png:byte(at,at+3);return ((a*256+b)*256+c)*256+d end
   return number(9)==13 and number(17)>0 and number(21)>0 and number(17)<=1600 and number(21)<=1600
-end
--- A signed storage grant: HTTPS on a DNS name only, with no path, port, user
--- info, localhost or IP literal. API tokens never go with it.
-local function uploadHost(url)
-  if type(url)~='string' then return false end
-  local host=url:match('^https://([%w%.%-]+)/?$')
-  if not host or not host:find('.',1,true) or host:sub(1,1)=='.' or host:sub(-1)=='.' then return false end
-  return host:match('^[%d%.]+$')==nil
 end
 function Reports.new(core, hash)
   local states=setmetatable({}, {__mode='k'})
@@ -64,7 +58,7 @@ function Reports.new(core, hash)
       local function finalize() send('/reports/'..state.id..'/finalize','{}',function(result) if result.status=='pending' then finish(nil,'invalid_response') else accept(result) end end) end
       if state.uploaded then finalize();return end
       send('/reports/'..state.id..'/upload','{}',function(grant)
-        if not uploadHost(grant.url) or type(grant.fields)~='table' then finish(nil,'invalid_upload');return end
+        if type(grant.url)~='string' or not grant.url:match(STORAGE_HOST) or type(grant.fields)~='table' then finish(nil,'invalid_upload');return end
         local boundary='ravensight_'..state.payload:sub(-20):gsub('[^%w]','')..core.randomHex(16)
         if state.png:find(boundary,1,true) then finish(nil,'invalid_upload');return end
         local chunks,bytes,count={},0,0

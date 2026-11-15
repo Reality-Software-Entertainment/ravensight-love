@@ -786,7 +786,7 @@ a server cancellation or request a refund. Text limits are checked in UTF-8
 bytes, which is conservative for non-ASCII text.
 
 Reports use bounded native libcurl or WinHTTP transfers in the existing worker;
-API tokens are never attached to the separate signed S3 upload. Redirects are
+API tokens are never attached to the separate signed storage upload. Redirects are
 refused, each response is capped at 64 KiB, and signed form fields precede the
 binary file. Platforms lacking those transports fail closed. The legacy HTTPS
 module and shell-curl fallback remain available for analytics but are not used for

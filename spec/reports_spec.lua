@@ -17,17 +17,17 @@ return {
  local r,c,q,i=fixture();local handle=assert(r.prepare(i));local output,err
  assert(r.submit(handle,function(value,e)output=value;err=e end));assert(not r.submit(handle,function()end))
  assert(q[1].req.headers['X-Session-Token']=='session-fixture');assert(json.decode(q[1].req.body).sha256==string.rep('a',64))
- q[1].cb(201,json.encode({id=string.rep('b',24),status='pending'}));q[2].cb(200,json.encode({url='https://fixture.s3.us-east-1.amazonaws.com/',fields={key='fixture',Policy='signed'}}))
+ q[1].cb(201,json.encode({id=string.rep('b',24),status='pending'}));q[2].cb(200,json.encode({url='https://uploads.example.com/',fields={key='fixture',Policy='signed'}}))
  assert(not q[3].req.headers['X-Session-Token']);assert(q[3].req.body:find(png,1,true));assert(q[3].req.body:find('name="file"',1,true)>q[3].req.body:find('name="key"',1,true))
  q[3].cb(204,'');q[4].cb(202,json.encode({id=string.rep('b',24),status='processing'}));assert(output.status=='processing' and not err)
  assert(r.submit(handle,function(value)output=value end));assert(q[5].req.method=='GET');q[5].cb(200,json.encode({id=string.rep('b',24),status='complete'}));assert(output.status=='complete')
  end},
  {'same session retry after ambiguous upload never creates another report',function()
- local r,c,q,i=fixture();local h=assert(r.prepare(i));local err;r.submit(h,function(_,e)err=e end);q[1].cb(201,json.encode({id=string.rep('b',24),status='pending'}));q[2].cb(200,json.encode({url='https://fixture.s3.amazonaws.com',fields={key='x'}}));q[3].cb(0,'');assert(err=='upload_failed');r.submit(h,function()end);assert(q[4].req.method=='GET');c.sessionToken='changed';q[4].cb(200,'{}');assert(not r.submit(h,function()end))
+ local r,c,q,i=fixture();local h=assert(r.prepare(i));local err;r.submit(h,function(_,e)err=e end);q[1].cb(201,json.encode({id=string.rep('b',24),status='pending'}));q[2].cb(200,json.encode({url='https://uploads.example.com',fields={key='x'}}));q[3].cb(0,'');assert(err=='upload_failed');r.submit(h,function()end);assert(q[4].req.method=='GET');c.sessionToken='changed';q[4].cb(200,'{}');assert(not r.submit(h,function()end))
  end},
  {'revocation stops workflow and hostile upload grants fail closed',function()
  local r,c,q,i=fixture();local h=assert(r.prepare(i));local err;r.submit(h,function(_,e)err=e end);c.enabled=false;q[1].cb(201,json.encode({id=string.rep('b',24),status='pending'}));assert(err=='report_session_unavailable' and #q==1)
- for _,url in ipairs({'http://example.com','https://localhost','https://fixture.s3.amazonaws.com@evil.test/'})do
+ for _,url in ipairs({'http://example.com','https://localhost','https://uploads.example.com@evil.test/','https://127.0.0.1/','https://uploads.example.com:8443/','https://uploads.example.com/path','https://.example.com/'})do
  r,c,q,i=fixture();h=assert(r.prepare(i));r.submit(h,function(_,e)err=e end);q[1].cb(201,json.encode({id=string.rep('b',24),status='pending'}));q[2].cb(200,json.encode({url=url,fields={key='x'}}));assert(err=='invalid_upload' and #q==2)
  end
  end},

@@ -45,7 +45,7 @@ commit before the annotated tag is published.
 
 The fixture additionally checks that exactly six requests arrived on libcurl and nine on Windows: no hidden
 redirect follow or retry. This is HTTP loopback transport acceptance, not TLS
-certificate validation, signed S3 multipart/API integration, actual screenshot
+certificate validation, signed storage multipart/API integration, actual screenshot
 capture, consent UI or a production upload roundtrip.
 
 ## Current evidence and Windows failure handling
@@ -85,7 +85,7 @@ options](https://learn.microsoft.com/en-us/windows/win32/winhttp/option-flags)
 and [transaction-phase timeout configuration](https://learn.microsoft.com/en-us/windows/win32/api/winhttp/nf-winhttp-winhttpsettimeouts).
 Both header and data settings are explicitly configured and checked. This
 acceptance establishes behavior on the tested Windows2022 architectures,
-not all Windows releases, TLS certificates, signed S3 upload integration,
+not all Windows releases, TLS certificates, signed storage upload integration,
 actual game capture or production-account acceptance.
 
 ## Reviewed CI execution sequence

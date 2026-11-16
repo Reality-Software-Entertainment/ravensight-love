@@ -2,6 +2,8 @@
 local prefix = (...):gsub('reports$', '')
 local json = require(prefix .. 'json')
 local Reports = {}
+-- The storage host the API signs uploads for; moves to files.ravensight.io.
+local STORAGE_HOST = '^https://[%w%.%-]+%.s3[%w%.%-]*%.amazonaws%.com/?$'
 local categories = {bug=true,suggestion=true,complaint=true,praise=true,playtest=true,other=true}
 local function validPng(png)
   if type(png) ~= 'string' or #png < 33 or #png > 1000000 or png:sub(1,8) ~= '\137PNG\r\n\26\n' or png:sub(13,16) ~= 'IHDR' then return false end
@@ -56,7 +58,7 @@ function Reports.new(core, hash)
       local function finalize() send('/reports/'..state.id..'/finalize','{}',function(result) if result.status=='pending' then finish(nil,'invalid_response') else accept(result) end end) end
       if state.uploaded then finalize();return end
       send('/reports/'..state.id..'/upload','{}',function(grant)
-        if type(grant.url)~='string' or not grant.url:match('^https://[%w%.%-]+%.s3[%w%.%-]*%.amazonaws%.com/?$') or type(grant.fields)~='table' then finish(nil,'invalid_upload');return end
+        if type(grant.url)~='string' or not grant.url:match(STORAGE_HOST) or type(grant.fields)~='table' then finish(nil,'invalid_upload');return end
         local boundary='ravensight_'..state.payload:sub(-20):gsub('[^%w]','')..core.randomHex(16)
         if state.png:find(boundary,1,true) then finish(nil,'invalid_upload');return end
         local chunks,bytes,count={},0,0

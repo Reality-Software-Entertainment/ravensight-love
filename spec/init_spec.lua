@@ -939,4 +939,56 @@ return {
       eq(w.sdk.isIdentified(), false)
     end)
   end },
+
+  -- ---------------------------------------------------------- campaign links
+
+  { 'setCampaignLink before init goes with the first session; after init with the next one', function()
+    local link = '64b0000000000000000000a1'
+    run(nil, nil, function(w)
+      local sent = errorWorld(w, {})
+      eq(w.sdk.setCampaignLink(link:upper()), true, 'held before init')
+      w.sdk.init({ ingestKey = 'gt_live_k', synchronous = true })
+      for _ = 1, 3 do w.sdk.update(0) end
+      local links = {}
+      for _, req in ipairs(sent) do
+        if req.url:find('/session$') then links[#links + 1] = json.decode(req.body).campaignLink or '-' end
+      end
+      eq(table.concat(links, ','), link, 'sent lowercased with the first session')
+      eq(w.sdk.setCampaignLink('64B0000000000000000000B2'), true, 'accepted after init')
+      local ok, reason = w.sdk.setCampaignLink('nope')
+      eq(ok, false); eq(reason, 'invalid_link')
+      for name, text in pairs(w.files) do
+        assert(not tostring(text):find(link, 1, true), 'never saved: ' .. name)
+      end
+    end)
+  end },
+
+  { 'setCampaignLink with no key or enabled = false is validated, held in memory and never sent', function()
+    for _, options in ipairs({ { ingestKey = '', optional = true }, { ingestKey = 'gt_live_k', enabled = false } }) do
+      run(nil, nil, function(w)
+        local selected = false
+        package.loaded['ravensight.transport'] = { select = function() selected = true end }
+        w.sdk.init(options)
+        eq(w.sdk.setCampaignLink('64b0000000000000000000a1'), true)
+        local ok, reason = w.sdk.setCampaignLink(nil)
+        eq(ok, false); eq(reason, 'invalid_link')
+        eq(next(w.files), nil, 'no file')
+        eq(selected, false, 'no transport')
+      end)
+    end
+  end },
+
+  { 'web: setCampaignLink is the page SDK\'s; nothing is printed for the bridge', function()
+    run('Web', nil, function(w)
+      local ok, reason = w.sdk.setCampaignLink('64b0000000000000000000a1')
+      eq(ok, false); eq(reason, 'use_javascript', 'before init on the web')
+      w.sdk.init({ transport = 'web' })
+      ok, reason = w.sdk.setCampaignLink('64b0000000000000000000a1')
+      eq(ok, false); eq(reason, 'use_javascript')
+      ok, reason = w.sdk.setCampaignLink('abc')
+      eq(ok, false); eq(reason, 'invalid_link')
+      eq(#w.after(), 0, 'no tagged line')
+      for _, line in ipairs(w.lines) do assert(not line:find('64b0', 1, true), 'the id is never printed') end
+    end)
+  end },
 }

@@ -61,7 +61,9 @@ none there. `init()` returns
 `{ sessionReady = false, reason = "web_bridge" }`, `getTransport()` is
 `"web"`, `getDeviceId()` is `nil`, and `resetDeviceId()`, `identify()` and
 `resetIdentity()` are calls to make on the page's SDK instead (`identify()`
-returns `false, "use_javascript"` there). Of the SDK events, only `event_tracked`,
+returns `false, "use_javascript"` there). A campaign link needs no call: the
+page's SDK reads `rs_link` from the page address itself (see "Campaign
+links"). Of the SDK events, only `event_tracked`,
 `tracking_disabled`, `feedback_failed` (for a refusal before sending, such
 as `"invalid_category"`) and `flush_failed` with `"event_too_large"` (an
 event whose data is over 8,192 bytes, never printed) fire in a web build;
@@ -109,7 +111,7 @@ needs in a web build:
 | 0.2.0 | `web/ravensight-love-bridge.js` | 0.4.0 | The bridge calls `rs.track`, `rs.submitFeedback`, `rs.setEnabled`, `rs.flush` and `rs.init`, all present in 0.4.0. 0.4.0 is the floor because the Lua SDK sends no `game_started` or `game_exited` on the web, and the JavaScript SDK sends them itself only from 0.4.0 (`autoEvents`). 0.4.0 also makes `init()` on an opted-out client open no session, which the remembered opt-out relies on. |
 | 0.3.0 | `web/ravensight-love-bridge.js` | 0.4.0 | No new call on the page's SDK is required. After the exit mailbox, the bridge calls `rs.flushOnHidden()` if it exists, else `rs._flushOnHidden()`, else `rs.flush()`. ravensight-js 0.4.x has the internal `_flushOnHidden` and no public `flushOnHidden` yet, so on 0.4.x the bridge calls `_flushOnHidden`. An opt-in page constructs its SDK with `enabled: false` and the bridge calls `rs.init()` on the player's yes, which 0.4.0 already supports. |
 | 0.4.0 | `web/ravensight-love-bridge.js` | 0.4.0 | The bridge also keeps the latest `health` line and tracks it once on `pagehide`, using `rs.track` only. Nothing new is required of the page's SDK. |
-| 0.8.0 | `web/ravensight-love-bridge.js` | 0.5.1 | No change to the bridge. To identify players in a web build, call `rs.identify()` and `rs.resetIdentity()` on the page's SDK, which needs `ravensight` 0.12.0. |
+| 0.8.0 | `web/ravensight-love-bridge.js` | 0.5.1 | No change to the bridge. To identify players in a web build, call `rs.identify()` and `rs.resetIdentity()` on the page's SDK, which needs `ravensight` 0.12.0. Campaign links in a web build are read from the page address by the page's SDK, from `ravensight` 0.8.0. |
 | 0.7.0 | `web/ravensight-love-bridge.js` | 0.5.1 | The bridge passes the game's first config read after each config answer to `rs.getConfig`, so the page SDK counts the experiment exposure. A page SDK with no `getConfig` is skipped. Delivery (saved queue, origins, compression, signing) on the web is the page SDK's. |
 
 Nothing in ravensight-love 0.2.0, 0.3.0 or 0.4.0 needs the 0.4.1 additions (`rs.session()`
@@ -346,6 +348,7 @@ end
 | `trackAdRevenue(network, format, placement, revenueMicros, currency, opts)` | A paid impression (`result` `shown`). |
 | `microsFromDecimalString(text)`, `microsFromRevenue(number)` | Revenue in micros as a digit string, without multiplying a float. |
 | `setAttribution(attribution)` | Where this install was acquired, sent once per install. |
+| `setCampaignLink(linkId)` | Send a Ravensight campaign link id with the next session. Returns `true`, or `false` and `"invalid_link"` (or `"use_javascript"` in a web build, where the page reads it). See "Campaign links". |
 | `getDeliveryStats()` | Desktop: events let go of since launch, `dropped_overflow`, `dropped_too_old`, `dropped_refused`. |
 | `flush()` | Send what is queued now instead of waiting for the timer. |
 | `submitFeedback(message, category, rating)` | Send player feedback. `category` is optional and one of `bug`, `suggestion`, `complaint`, `praise`, `playtest` or `other`; `rating` is optional and a whole number from 1 to 5. Needs an open session. Returns `true` when sent, or `false` and a reason (`"invalid_category"`, `"invalid_rating"`, `"no_session"`, `"empty_message"`, `"tracking_disabled"`, or `"not_started"` before `init`, with `enabled = false` or while inert) when refused before sending. |
@@ -531,6 +534,8 @@ line, the SDK's handler, between your code and LÖVE's.
   account, and `resetDeviceId()` replaces it.
 - **A salted hash of your own account id**, only when your game calls
   `identify()`, once per session (see "Identify players who sign in").
+- **A campaign link id**, once, on the first session after your game calls
+  `setCampaignLink()` (see "Campaign links").
 - **The events you track**, with a timestamp, your game version and the OS,
   and an `rs_event_id` in each event's data (see "Public builds").
 - **Your `distribution` label**, if you set one.
@@ -683,6 +688,57 @@ stops later calls; `resetDeviceId()` clears it. Pass `getDeviceId()` to an
 attribution partner as its customer user id so its install callback names
 this device.
 
+## Campaign links
+
+A Ravensight campaign link adds `rs_link=<link id>` to the address it
+redirects to.
+
+- **Web build: nothing to call.** The page's JavaScript SDK reads `rs_link`
+  from the page address (`location.search`) once, when it is constructed,
+  and sends it as `campaignLink` with the first session it opens
+  (`ravensight` 0.8.0 or newer on the page). `setCampaignLink()` returns
+  `false, "use_javascript"` there.
+- **Desktop: pass it on yourself**, from the address your game was opened
+  with, such as a custom URL scheme or deep link that hands it to the game
+  on the command line. Call `setCampaignLink()` before `init` if you can; a
+  later call goes with the next session the SDK opens.
+
+```lua
+-- The rs_link value of an address such as
+-- mygame://open?rs_link=64b0000000000000000000a1
+local function rsLinkFrom(address)
+  local query = address:match('^[^#?]*%?([^#]*)') or ''
+  for pair in query:gmatch('[^&]+') do
+    local key, value = pair:match('^([^=]*)=?(.*)$')
+    if key == 'rs_link' then return value end
+  end
+end
+
+function love.load(args)
+  for _, a in ipairs(args) do
+    local id = rsLinkFrom(a)
+    if id then ravensight.setCampaignLink(id) break end
+  end
+  ravensight.init({ ingestKey = 'gt_live_...', gameVersion = '1.0.0' })
+end
+```
+
+`setCampaignLink(linkId)` returns `true` when the value is a link id (24 hex
+characters, in any case), which then replaces a link still waiting. For
+anything else it returns `false, "invalid_link"` and nothing changes. The id
+goes lowercased, as `campaignLink`, on the session:
+
+- **Sent once.** Only a session answer with a token clears it, so a failed
+  attempt keeps it for the next one. Later sessions carry none.
+- **Same consent as everything else.** With `consent = "opt_in"` it goes
+  with the first session after the player's yes. An opted out player, a run
+  with `enabled = false` or without a key sends nothing, and a playtest run
+  never sends it.
+- **Nothing is stored.** The id is one your studio made, not personal data.
+- The server keeps it only when it names a link of the same game. The player
+  and the session are then counted on the Campaign links page, by link, and
+  those players open in Player insights.
+
 ## Playtest
 
 Ravensight Playtest has no LÖVE adapter yet. If you drive a LÖVE build
@@ -739,6 +795,7 @@ ravensight.resetIdentity()       -- on sign-out
 | Opt-in consent | `consent = "opt_in"`, saved | Construct with `enabled: false`, then `setEnabled(true)` |
 | Batching | 2 seconds after the first waiting event, or at 50 events | On a timer, or at 50 events |
 | Identify | `identify(accountId)`, `resetIdentity()` | `identify(accountId)`, `resetIdentity()` |
+| Campaign links | `setCampaignLink(linkId)` on the desktop; the page's SDK on the web | Read from `rs_link` on the page address |
 | Web | Through the bridge to the JavaScript SDK | Runs on the page |
 
 ## Develop

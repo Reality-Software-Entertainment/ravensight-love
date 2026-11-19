@@ -800,3 +800,7 @@ not a strict overall wall-clock deadline. In the measured Windows Server 2022 fi
 while a one-second response succeeded with a 150 ms setting. This is observed
 behavior, not a universal four-second floor or maximum. See
 [the native acceptance record](https://github.com/Reality-Software-Entertainment/ravensight-love/blob/main/docs/WINDOWS_TRANSPORT_ACCEPTANCE.md).
+
+## Contributing
+
+Install the local checks once per clone: `git config core.hooksPath .githooks`. The pre-push hook then runs this repository's tests before every push, with a time limit, and refuses the push if they fail. CI runs nightly and on demand, not on pushes or pull requests, so this hook is where a change is checked first.

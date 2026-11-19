@@ -507,4 +507,55 @@ return {
       eq(w.count(), 0, bad)
     end
   end },
+  { 'review F2: the same account before the salt is re-hashed under a new salt, never lost', function()
+    local d = V.salts_differ
+    local w = world({ salt = d.salt_a })
+    local first = started(w)
+    first:identify(d.accountId)
+    w.serve()
+    eq(w.sends()[1].accountHash, d.wire_a)
+    w.salt = d.salt_b
+    local core = w.client()
+    core:start()
+    core:identify(d.accountId)
+    w.serve()
+    local sends = w.sends(1)
+    eq(#sends, 1, 'not lost')
+    eq(sends[1].accountHash, d.wire_b, 'hashed under the new salt')
+    same_as(w.stored(), { salt = d.salt_b, accountHash = d.wire_b })
+  end },
+
+  { 'review F4: before the opt-in yes a decline or resetIdentity removes an identity on disk', function()
+    local saved = json.encode(SEQ[2].expect.stored)
+    local w = world({ salt = SALT })
+    w.files[Core.IDENTITY_FILE] = saved
+    local declined = w.client({ consent = 'opt_in' })
+    declined:start()
+    declined:setTrackingEnabled(false)
+    eq(w.files[Core.IDENTITY_FILE], nil, 'a decline deletes it')
+
+    local w2 = world({ salt = SALT })
+    local oldId = string.rep('0', 32) .. '-macos'
+    w2.files[Core.IDENTITY_FILE] = saved
+    w2.files[Core.DEVICE_ID_FILE] = oldId
+    local core = w2.client({ consent = 'opt_in' })
+    core:start()
+    core:resetIdentity()
+    eq(w2.files[Core.IDENTITY_FILE], nil, 'a sign-out before the yes deletes it')
+    core:setTrackingEnabled(true)
+    w2.serve()
+    assert(core.deviceId ~= oldId and core.deviceId ~= '', 'the device is rotated')
+    eq(w2.count(), 0, 'the signed-out hash is never sent')
+  end },
+
+  { 'review: a playtest run never touches the player saved identity', function()
+    local saved = json.encode(SEQ[2].expect.stored)
+    local w = world({ salt = SALT })
+    w.files[Core.IDENTITY_FILE] = saved
+    local core = started(w, { playtest = { token = 'pt_tok', run_id = 'run1' } })
+    core:identify('u1')
+    core:identify('u2')
+    core:resetIdentity()
+    eq(w.files[Core.IDENTITY_FILE], saved)
+  end },
 }

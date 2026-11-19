@@ -819,8 +819,11 @@ end
 
 --- Links this device to your game's own account once the player signs in,
 --- so one person on two devices, or before and after sign-in, counts as one
---- player. Pass an opaque internal id (a database key or a UUID), a string
---- or a whole number used as its decimal digits; never an email or a name.
+--- player. Pass a random, high-entropy id (a random UUID or analytics id
+--- stored with the account), a string or a whole number used as its decimal
+--- digits; never a sequential database key, an email or a name: the salt
+--- reaches every client, so a guessable id can be matched. The hash is a
+--- pseudonymous identifier to declare in the game's privacy notice.
 ---
 --- Only a salted hash of the id (accountHash, HMAC-SHA256 keyed with the
 --- game's salt from the session answer) is sent, with the session token,

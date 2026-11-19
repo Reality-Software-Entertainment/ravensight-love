@@ -698,8 +698,8 @@ and `resetIdentity()` when they sign out. One person on two devices, or
 before and after signing in, then counts as one player.
 
 ```lua
-ravensight.identify(account.id)  -- after your own sign-in
-ravensight.resetIdentity()       -- on sign-out
+ravensight.identify(account.analyticsId)  -- after your own sign-in: a random id stored with the account
+ravensight.resetIdentity()                -- on sign-out
 ```
 
 - **What is sent:** a salted hash of the id (`accountHash`, 64 hex
@@ -707,8 +707,15 @@ ravensight.resetIdentity()       -- on sign-out
   the session token, once per session. The raw account id, an email or a
   name is never sent and never saved; until the first session answer the id
   is held in memory only.
-- **Pass an opaque internal id**, such as a database key or a UUID, as a
-  string or a whole number (used as its decimal digits). A value that is
+- **Pass a random, high-entropy id**, such as a random UUID or a random
+  analytics id you make once for each account and store with it, never a
+  sequential database key, an email, a name or a handle. Your game's salt
+  reaches every copy of the game, so anyone could hash 1, 2, 3 and onward
+  and match a guessable id; a random one cannot be guessed. The hash is
+  still a pseudonymous identifier for the player: declare it in your game's
+  privacy notice. Pass it as a string; a whole number is accepted and used
+  as its decimal digits, but a sequential number is exactly the guessable
+  kind. A value that is
   empty, over 256 bytes of UTF-8 or contains `@` is refused: `identify()`
   returns `false` and the reason (`"not_text"`, `"empty"`, `"too_long"` or
   `"looks_like_email"`), prints one warning, and nothing changes.

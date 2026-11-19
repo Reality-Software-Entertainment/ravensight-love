@@ -558,4 +558,28 @@ return {
     core:resetIdentity()
     eq(w.files[Core.IDENTITY_FILE], saved)
   end },
+  { 'review F7: a device clock days ahead still identifies the session that just opened', function()
+    local w = world({ salt = SALT })
+    local core = w.client()
+    core:start()
+    core:identify('u1')
+    for _ = 1, 20 do
+      local r
+      for _, q in ipairs(w.requests) do if not q.answered then r = q break end end
+      if not r then break end
+      r.answered = true
+      local url = r.req.url
+      if url:find('/settings', 1, true) then
+        r.cb(200, json.encode({ trackingEnabled = true }), {})
+      elseif url:find('/session', 1, true) then
+        -- The absolute expiry is already past by the device clock.
+        r.cb(201, json.encode({ token = 'S1', expiresIn = 86400, expiresAt = w.wall - 3 * 86400, identify = { salt = SALT } }), {})
+      elseif url:find('/identify', 1, true) then
+        r.cb(200, json.encode({ playerId = 'px_test' }), {})
+      else
+        r.cb(202, '{}', {})
+      end
+    end
+    eq(w.count(), 1, 'identified')
+  end },
 }

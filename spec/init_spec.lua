@@ -991,4 +991,12 @@ return {
       for _, line in ipairs(w.lines) do assert(not line:find('64b0', 1, true), 'the id is never printed') end
     end)
   end },
+
+  { 'web: setCampaignLink says use_javascript after an init that opened no transport (enabled = false)', function()
+    run('Web', nil, function(w)
+      w.sdk.init({ transport = 'web', enabled = false })
+      local ok, reason = w.sdk.setCampaignLink('64b0000000000000000000a1')
+      eq(ok, false); eq(reason, 'use_javascript')
+    end)
+  end },
 }

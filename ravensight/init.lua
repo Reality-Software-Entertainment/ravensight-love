@@ -907,7 +907,9 @@ local warnedWebCampaignLink = false
 function ravensight.setCampaignLink(linkId)
   local id = Core.campaignLinkId(linkId)
   if not id then return false, 'invalid_link' end
-  if transportName == 'web' or (not initialized and systemName() == 'Web') then
+  -- The OS, not only the transport: an init with enabled = false opens no
+  -- transport, and the page still owns the link.
+  if transportName == 'web' or systemName() == 'Web' then
     if not warnedWebCampaignLink then
       warnedWebCampaignLink = true
       log('info', 'setCampaignLink() is not needed in a web build: the page\'s ravensight-js reads rs_link from the page address')

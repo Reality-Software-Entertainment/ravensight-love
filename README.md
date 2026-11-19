@@ -795,7 +795,7 @@ ravensight.resetIdentity()       -- on sign-out
 | Opt-in consent | `consent = "opt_in"`, saved | Construct with `enabled: false`, then `setEnabled(true)` |
 | Batching | 2 seconds after the first waiting event, or at 50 events | On a timer, or at 50 events |
 | Identify | `identify(accountId)`, `resetIdentity()` | `identify(accountId)`, `resetIdentity()` |
-| Campaign links | `setCampaignLink(linkId)` on the desktop; the page's SDK on the web | Read from `rs_link` on the page address |
+| Campaign links | `setCampaignLink(linkId)` on the desktop; the page's SDK on the web | Read from `rs_link` on the page address; `setCampaignLink(linkId)` from 0.12.0 |
 | Web | Through the bridge to the JavaScript SDK | Runs on the page |
 
 ## Develop

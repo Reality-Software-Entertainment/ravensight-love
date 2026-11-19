@@ -1255,7 +1255,9 @@ function Core:identify(accountId)
     return true
   end
   if self.identifySaltState == 'unknown' or not self:identityAllowed() then
-    if not self.identity then self.heldAccountId = id end
+    -- No salt this launch yet, or not allowed to save: hold the id in memory
+    -- only, and hash it under whichever salt the session answer brings.
+    self.heldAccountId = id
     return true
   end
   if not self.identity then
@@ -1275,7 +1277,10 @@ end
 --- device id as resetDeviceId() does. Sends nothing; does nothing when no
 --- account is stored or held.
 function Core:resetIdentity()
-  if not self.identity and self.heldAccountId == nil then return end
+  -- An identity saved by an earlier launch counts too, even before the
+  -- opt-in yes, when it was never loaded.
+  local onDisk = self.playtestToken == '' and self.storage.read(Core.IDENTITY_FILE) ~= nil
+  if not self.identity and self.heldAccountId == nil and not onDisk then return end
   self:forgetIdentity()
   self:resetDeviceId()
 end
@@ -1295,7 +1300,9 @@ function Core:forgetIdentity()
   self.identifySentOn = nil
   self.heldAccountId = nil
   self.identity = nil
-  self.storage.remove(Core.IDENTITY_FILE)
+  self.identifyNoSessionRetried = false
+  -- Never the player's saved identity in a playtest run.
+  if self.playtestToken == '' then self.storage.remove(Core.IDENTITY_FILE) end
 end
 
 --- The saved identity when it is well formed, else nil. Never writes.
@@ -1384,6 +1391,8 @@ function Core:onIdentifyResponse(status, body, generation)
     -- Again once, when the next session opens; twice in a row ends it.
     if self.identifyNoSessionRetried then self.identifyStopped = true end
     self.identifyNoSessionRetried = true
+  else
+    self.identifyNoSessionRetried = false
   end
   -- Anything else (409, 429 identify_limited, rate_limited or needs_funds,
   -- 5xx, offline): the identity is kept, this session is not tried again,

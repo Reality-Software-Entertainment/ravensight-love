@@ -47,6 +47,7 @@ local health        -- the performance sampler, only with performance = true
 local capture       -- automatic error capture (ravensight/errors.lua), once installed
 local held = {}     -- boot errors captured before the first session answer
 local MAX_HELD = 5
+local heldCampaignLink -- a campaign link id set before init (memory only)
 --- Crashes captured before the session answer, saved so the next launch can
 --- send them once its answer says capture is on, or discard them if off.
 local CRASH_FILE = 'ravensight_crash.json'
@@ -608,6 +609,11 @@ function ravensight.init(options)
   -- The session answer carries the game's switch: it releases or discards
   -- the boot errors held until then.
   core:on('session_ready', function() pcall(releaseHeld) end)
+  -- A campaign link the game set before init goes with the first session.
+  if heldCampaignLink then
+    core:setCampaignLink(heldCampaignLink)
+    heldCampaignLink = nil
+  end
   core:start()
   installCapture()
   if config.performance then
@@ -879,6 +885,40 @@ end
 function ravensight.isIdentified()
   if core and transportName ~= 'web' then return core:isIdentified() end
   return inertAccountId ~= nil
+end
+
+-- ---------------------------------------------------------- campaign links
+
+local warnedWebCampaignLink = false
+
+--- Sends a Ravensight campaign link with the next session the SDK opens, so
+--- the player is counted on the Campaign links page. Call it from the
+--- handler your game already has for the address it was opened with (a
+--- custom URL scheme, a deep link, an install referrer), with the `rs_link`
+--- value of that address. Best called before init, or before the first
+--- session opens; a later call goes with the next session.
+---
+--- Returns true when `linkId` is a link id (24 hex characters, in any case),
+--- which then replaces any link waiting. Otherwise false and the reason:
+--- "invalid_link", or "use_javascript" in a web build, where the page's
+--- ravensight-js reads rs_link from the page address itself. A refusal
+--- changes nothing. Memory only; sent once, never in a playtest run, and
+--- only when a session may open (a key, enabled, and the player's consent).
+function ravensight.setCampaignLink(linkId)
+  local id = Core.campaignLinkId(linkId)
+  if not id then return false, 'invalid_link' end
+  if transportName == 'web' or (not initialized and systemName() == 'Web') then
+    if not warnedWebCampaignLink then
+      warnedWebCampaignLink = true
+      log('info', 'setCampaignLink() is not needed in a web build: the page\'s ravensight-js reads rs_link from the page address')
+    end
+    return false, 'use_javascript'
+  end
+  if core then return core:setCampaignLink(id) end
+  -- Before init it is handed to the core at init. With no key or
+  -- enabled = false it stays here, in memory, and is never sent.
+  heldCampaignLink = id
+  return true
 end
 
 --- This install's random device id. nil in a web build, where the page's

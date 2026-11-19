@@ -85,6 +85,8 @@ Core.OPTIN_FILE = 'ravensight_optin'
 --- the account id.
 Core.IDENTITY_FILE = 'ravensight_identity'
 Core.IDENTIFY_MAX_BYTES = 256
+--- A campaign link id: this many hex characters, sent lowercased.
+Core.CAMPAIGN_LINK_LENGTH = 24
 
 Core.CONSENT_OPT_OUT = 'opt_out'
 Core.CONSENT_OPT_IN = 'opt_in'
@@ -312,6 +314,10 @@ function Core.new(deps)
   self.identifyStopped = false
   self.identifyNoSessionRetried = false
 
+  -- The campaign link waiting for the next session this core opens for its
+  -- own player (24 lowercase hex characters), or nil. Memory only.
+  self.campaignLink = nil
+
   self.playtestToken = ''
   self.playtestRunId = ''
   self.playtestTags = nil
@@ -522,13 +528,16 @@ function Core:startSession()
   if self.distribution then body.distribution = self.distribution end
   if next(self.device) then body.device = self.device end
   body.sdk = 'love/' .. Core.VERSION
+  -- The player's own session only, never a playtest run, and once.
+  local campaignLink = self.playtestToken == '' and self.campaignLink or nil
+  if campaignLink then body.campaignLink = campaignLink end
   self.send({
     method = 'POST',
     url = self.apiUrl .. '/api/v1/session',
     headers = headers,
     body = json.encode(body),
   }, function(status, body, responseHeaders)
-    self:onSessionResponse(status, body, responseHeaders, generation)
+    self:onSessionResponse(status, body, responseHeaders, generation, campaignLink)
   end)
 end
 
@@ -564,7 +573,14 @@ local function retryAfter(headers)
   return seconds or -1
 end
 
-function Core:onSessionResponse(status, body, headers, generation)
+function Core:onSessionResponse(status, body, headers, generation, campaignLink)
+  -- The campaign link this request carried opened a session, so it is never
+  -- sent again, even when the answer is otherwise ignored below. A link set
+  -- while the request was in flight waits for the next session.
+  if status == 201 and campaignLink and campaignLink == self.campaignLink then
+    local opened = json.decode(body or '')
+    if type(opened) == 'table' and opened.token then self.campaignLink = nil end
+  end
   -- A newer attempt has started since this one went out: ignore it.
   if generation ~= self.sessionGeneration then return end
   self.sessionPending = false
@@ -1199,6 +1215,27 @@ function Core:resetDeviceId()
   self.storage.write(Core.DEVICE_ID_FILE, self.deviceId)
   self:dropSession()
   self:clearQueue(true)
+end
+
+-- ---------------------------------------------------------- campaign links
+
+--- `value` lowercased when it is a campaign link id (24 hex characters, in
+--- any case), otherwise nil. Never trimmed: surrounding spaces refuse it.
+function Core.campaignLinkId(value)
+  if type(value) ~= 'string' or #value ~= Core.CAMPAIGN_LINK_LENGTH or not value:match('^%x+$') then return nil end
+  return value:lower()
+end
+
+--- Holds a campaign link for the next session this core opens. Returns true
+--- when `value` is a link id, which then replaces any link waiting; false,
+--- with nothing changed, otherwise. Memory only, never sent in a playtest
+--- run, and cleared only when a session that carried it answers 201 with a
+--- token.
+function Core:setCampaignLink(value)
+  local id = Core.campaignLinkId(value)
+  if not id then return false end
+  self.campaignLink = id
+  return true
 end
 
 -- ---------------------------------------------------------------- identify

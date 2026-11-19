@@ -804,6 +804,83 @@ function ravensight.resetDeviceId()
   storage.remove(CRASH_FILE)
 end
 
+-- ------------------------------------------- identify players who sign in
+
+local inertAccountId -- a valid id held in memory by an inert or disabled start
+local warnedWebIdentify = false
+
+--- A new device id forgets the captures of the old one, as resetDeviceId does.
+local function forgetCapturesIfDeviceChanged(before)
+  if core.deviceId ~= before then
+    held = {}
+    storage.remove(CRASH_FILE)
+  end
+end
+
+--- Links this device to your game's own account once the player signs in,
+--- so one person on two devices, or before and after sign-in, counts as one
+--- player. Pass an opaque internal id (a database key or a UUID), a string
+--- or a whole number used as its decimal digits; never an email or a name.
+---
+--- Only a salted hash of the id (accountHash, HMAC-SHA256 keyed with the
+--- game's salt from the session answer) is sent, with the session token,
+--- once per session, and saved as ravensight_identity beside the device id.
+--- The id itself is held in memory only until that salt is known. A
+--- different account first does resetIdentity(). It never enters the event
+--- queue or delays an event. Without a key, before an opt_in yes, or in a
+--- playtest run it is held in memory only.
+---
+--- Returns true, or false and the reason: "not_text", "empty", "too_long"
+--- (over 256 bytes of UTF-8), "looks_like_email" (any "@"), "not_started"
+--- (before init), or "use_javascript" in a web build, where the page's
+--- ravensight-js handles identify. A refusal changes nothing.
+function ravensight.identify(accountId)
+  local id, reason = Core.identifyRefusal(accountId)
+  if not id then
+    log('warn', 'identify() refused (' .. reason .. '): pass a non-empty internal id of at most 256 bytes with no @')
+    return false, reason
+  end
+  if not initialized then return false, 'not_started' end
+  if transportName == 'web' then
+    if not warnedWebIdentify then
+      warnedWebIdentify = true
+      log('warn', 'identify() is handled by ravensight-js on the page in a web build; call it there')
+    end
+    return false, 'use_javascript'
+  end
+  if not core then
+    -- Inert (no key) or enabled = false: held in memory, never sent.
+    inertAccountId = id
+    return true
+  end
+  local before = core.deviceId
+  local ok, why = core:identify(id)
+  forgetCapturesIfDeviceChanged(before)
+  return ok, why
+end
+
+--- For sign-out: forgets the account and switches to a fresh device id as
+--- resetDeviceId() does, so the next player is not linked to the last one.
+--- Sends nothing; does nothing when no account is set. In a web build the
+--- page owns the identity; call the JavaScript SDK there instead.
+function ravensight.resetIdentity()
+  inertAccountId = nil
+  if not core then return end
+  if transportName == 'web' then
+    log('info', 'resetIdentity() is handled by ravensight-js on the page in a web build')
+    return
+  end
+  local before = core.deviceId
+  core:resetIdentity()
+  forgetCapturesIfDeviceChanged(before)
+end
+
+--- True while an account is set by identify(). The id is never readable.
+function ravensight.isIdentified()
+  if core and transportName ~= 'web' then return core:isIdentified() end
+  return inertAccountId ~= nil
+end
+
 --- This install's random device id. nil in a web build, where the page's
 --- JavaScript SDK keeps it.
 function ravensight.getDeviceId()

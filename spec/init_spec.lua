@@ -878,4 +878,65 @@ return {
       eq(love.errorhandler, default)
     end)
   end },
+  -- ------------------------------------------------ 0.8.0: identify
+
+  { 'identify on the desktop hashes with the session salt and sends once', function()
+    run(nil, nil, function(w)
+      local salt = string.rep('ab', 32)
+      local sent = errorWorld(w, { identify = { salt = salt } })
+      w.sdk.init({ ingestKey = 'gt_live_k', synchronous = true })
+      w.sdk.update(0)
+      eq(w.sdk.identify('u1'), true)
+      eq(w.sdk.isIdentified(), true)
+      local identifies = {}
+      for _, req in ipairs(sent) do if req.url:find('/api/v1/identify', 1, true) then identifies[#identifies + 1] = req end end
+      eq(#identifies, 1, 'one identify')
+      eq(identifies[1].body, '{"accountHash":"' .. require('ravensight.hmac').hex(salt, 'u1') .. '"}')
+      local ok, reason = w.sdk.identify('a@b')
+      eq(ok, false); eq(reason, 'looks_like_email')
+      w.sdk.resetIdentity()
+      eq(w.sdk.isIdentified(), false)
+      eq(w.files.ravensight_identity, nil)
+    end)
+  end },
+
+  { 'identify with no key is validated and held in memory only', function()
+    run(nil, nil, function(w)
+      local selected = false
+      package.loaded['ravensight.transport'] = { select = function() selected = true end }
+      w.sdk.init({ ingestKey = '', optional = true })
+      eq(w.sdk.identify('u1'), true)
+      eq(w.sdk.isIdentified(), true)
+      local ok, reason = w.sdk.identify('')
+      eq(ok, false); eq(reason, 'empty')
+      w.sdk.resetIdentity()
+      eq(w.sdk.isIdentified(), false)
+      eq(next(w.files), nil, 'no file')
+      eq(selected, false, 'no transport')
+    end)
+  end },
+
+  { 'identify before init refuses bad input and says not_started', function()
+    run(nil, nil, function(w)
+      local ok, reason = w.sdk.identify(12.5)
+      eq(ok, false); eq(reason, 'not_text')
+      ok, reason = w.sdk.identify('u1')
+      eq(ok, false); eq(reason, 'not_started')
+      eq(w.sdk.isIdentified(), false)
+    end)
+  end },
+
+  { 'web: identify is handled by ravensight-js on the page; nothing is printed for the bridge', function()
+    run('Web', nil, function(w)
+      w.sdk.init({ transport = 'web' })
+      local ok, reason = w.sdk.identify('u1')
+      eq(ok, false); eq(reason, 'use_javascript')
+      ok, reason = w.sdk.identify('a@b')
+      eq(ok, false); eq(reason, 'looks_like_email')
+      w.sdk.resetIdentity()
+      eq(#w.after(), 0, 'no tagged line')
+      for _, line in ipairs(w.lines) do assert(not line:find('u1', 1, true), 'the id is never printed') end
+      eq(w.sdk.isIdentified(), false)
+    end)
+  end },
 }

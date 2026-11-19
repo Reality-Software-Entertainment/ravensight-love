@@ -59,8 +59,9 @@ lifecycle events, `game_started` and `game_exited`, so the Lua SDK sends
 neither of them there. The key lives on the page, so the Lua `init` needs
 none there. `init()` returns
 `{ sessionReady = false, reason = "web_bridge" }`, `getTransport()` is
-`"web"`, `getDeviceId()` is `nil`, and `resetDeviceId()` is a call to make
-on the page's SDK instead. Of the SDK events, only `event_tracked`,
+`"web"`, `getDeviceId()` is `nil`, and `resetDeviceId()`, `identify()` and
+`resetIdentity()` are calls to make on the page's SDK instead (`identify()`
+returns `false, "use_javascript"` there). Of the SDK events, only `event_tracked`,
 `tracking_disabled`, `feedback_failed` (for a refusal before sending, such
 as `"invalid_category"`) and `flush_failed` with `"event_too_large"` (an
 event whose data is over 8,192 bytes, never printed) fire in a web build;
@@ -108,6 +109,7 @@ needs in a web build:
 | 0.2.0 | `web/ravensight-love-bridge.js` | 0.4.0 | The bridge calls `rs.track`, `rs.submitFeedback`, `rs.setEnabled`, `rs.flush` and `rs.init`, all present in 0.4.0. 0.4.0 is the floor because the Lua SDK sends no `game_started` or `game_exited` on the web, and the JavaScript SDK sends them itself only from 0.4.0 (`autoEvents`). 0.4.0 also makes `init()` on an opted-out client open no session, which the remembered opt-out relies on. |
 | 0.3.0 | `web/ravensight-love-bridge.js` | 0.4.0 | No new call on the page's SDK is required. After the exit mailbox, the bridge calls `rs.flushOnHidden()` if it exists, else `rs._flushOnHidden()`, else `rs.flush()`. ravensight-js 0.4.x has the internal `_flushOnHidden` and no public `flushOnHidden` yet, so on 0.4.x the bridge calls `_flushOnHidden`. An opt-in page constructs its SDK with `enabled: false` and the bridge calls `rs.init()` on the player's yes, which 0.4.0 already supports. |
 | 0.4.0 | `web/ravensight-love-bridge.js` | 0.4.0 | The bridge also keeps the latest `health` line and tracks it once on `pagehide`, using `rs.track` only. Nothing new is required of the page's SDK. |
+| 0.8.0 | `web/ravensight-love-bridge.js` | 0.5.1 | No change to the bridge. To identify players in a web build, call `rs.identify()` and `rs.resetIdentity()` on the page's SDK, which needs `ravensight` 0.12.0. |
 | 0.7.0 | `web/ravensight-love-bridge.js` | 0.5.1 | The bridge passes the game's first config read after each config answer to `rs.getConfig`, so the page SDK counts the experiment exposure. A page SDK with no `getConfig` is skipped. Delivery (saved queue, origins, compression, signing) on the web is the page SDK's. |
 
 Nothing in ravensight-love 0.2.0, 0.3.0 or 0.4.0 needs the 0.4.1 additions (`rs.session()`
@@ -351,6 +353,9 @@ end
 | `isTrackingEnabled()` | `false` when the player opted out (or has not opted in), or tracking is switched off for your game. While inert or with `enabled = false`, the player's saved choice. |
 | `enabled()` | `true` only while the SDK is running and collecting. `false` when inert, with `enabled = false`, opted out, switched off by the server or after a refused key. |
 | `resetDeviceId()` | Start a fresh analytics identity for this install. |
+| `identify(accountId)` | Link this device to your game's own account after sign-in. Returns `true`, or `false` and a reason. See "Identify players who sign in". |
+| `resetIdentity()` | On sign-out: forget the account and switch to a fresh device id. |
+| `isIdentified()` | `true` while an account is set by `identify()`. |
 | `getDeviceId()` | This install's random id. `nil` while inert, in a web build, and with `consent = "opt_in"` before the first yes. |
 | `setPlaytestContext(ctx)` | Puts a running game into playtest mode. `ctx` needs `token` and `run_id` (plus optional `persona`, `job_id` and `tier`), the same values the playtest CLI passes as `RAVENSIGHT_PLAYTEST_*` variables; it uses a throwaway device id, ignores the player's opt-out, and tags every event as synthetic. `init` already does this when those variables are set, so a game never needs to call it by hand. |
 | `getTransport()` | How requests are sent here, or `nil` if nothing works. |
@@ -524,6 +529,8 @@ line, the SDK's handler, between your code and LÖVE's.
   name, generated from the operating system's random source on first launch
   and saved in your game's save folder. It is not derived from hardware or an
   account, and `resetDeviceId()` replaces it.
+- **A salted hash of your own account id**, only when your game calls
+  `identify()`, once per session (see "Identify players who sign in").
 - **The events you track**, with a timestamp, your game version and the OS,
   and an `rs_event_id` in each event's data (see "Public builds").
 - **Your `distribution` label**, if you set one.
@@ -533,8 +540,8 @@ line, the SDK's handler, between your code and LÖVE's.
   `love.graphics.getRendererInfo()`), at most 128 printable characters. LÖVE
   reports no device model or OS version, so none is sent. It is not a
   hardware identifier. Country is never sent by the SDK.
-- **No advertising identifier, no names, no emails, no accounts.** There is
-  no field for them.
+- **No advertising identifier, no names, no emails.** There is no field for
+  them, and `identify()` refuses any value containing `@`.
 
 That is why a game using it needs no tracking permission prompt. The
 [privacy label section of the docs](https://ravensight.io/docs/#privacy-label)
@@ -684,6 +691,42 @@ same `RAVENSIGHT_PLAYTEST_TOKEN` and `RAVENSIGHT_PLAYTEST_RUN_ID` variables as
 every other SDK: it then uses a throwaway id and tags every event as
 synthetic, so persona sessions never mix with real players.
 
+## Identify players who sign in
+
+If your game has its own login, call `identify()` once the player signs in
+and `resetIdentity()` when they sign out. One person on two devices, or
+before and after signing in, then counts as one player.
+
+```lua
+ravensight.identify(account.id)  -- after your own sign-in
+ravensight.resetIdentity()       -- on sign-out
+```
+
+- **What is sent:** a salted hash of the id (`accountHash`, 64 hex
+  characters, keyed with your game's own salt from the session answer) and
+  the session token, once per session. The raw account id, an email or a
+  name is never sent and never saved; until the first session answer the id
+  is held in memory only.
+- **Pass an opaque internal id**, such as a database key or a UUID, as a
+  string or a whole number (used as its decimal digits). A value that is
+  empty, over 256 bytes of UTF-8 or contains `@` is refused: `identify()`
+  returns `false` and the reason (`"not_text"`, `"empty"`, `"too_long"` or
+  `"looks_like_email"`), prints one warning, and nothing changes.
+- **One event per identified session** on your usage balance. The same
+  account again in the same session sends nothing; a refused or failed
+  request is tried once more at the next session, never in a loop.
+- **A different account** on the same device first does `resetIdentity()`,
+  which deletes the saved hash and switches to a fresh device id (as
+  `resetDeviceId()` does), so the next player is not linked to the last
+  one. `resetDeviceId()` alone keeps the identity.
+- The hash is saved as `ravensight_identity` in the save folder, beside the
+  device id. It never enters the event queue and never delays an event.
+  Without a key, before an opt-in yes, or in a playtest run it is held in
+  memory only; `setTrackingEnabled(false)` deletes it.
+- **In a web build** the page's JavaScript SDK owns the identity: call
+  `rs.identify()` and `rs.resetIdentity()` there (`ravensight` 0.12.0 or
+  newer).
+
 ## How this compares with the JavaScript SDK
 
 | | This SDK (LÖVE) | JavaScript SDK |
@@ -695,6 +738,7 @@ synthetic, so persona sessions never mix with real players.
 | Player opt-out | `setTrackingEnabled(false)`, saved | `setEnabled(false)` |
 | Opt-in consent | `consent = "opt_in"`, saved | Construct with `enabled: false`, then `setEnabled(true)` |
 | Batching | 2 seconds after the first waiting event, or at 50 events | On a timer, or at 50 events |
+| Identify | `identify(accountId)`, `resetIdentity()` | `identify(accountId)`, `resetIdentity()` |
 | Web | Through the bridge to the JavaScript SDK | Runs on the page |
 
 ## Develop

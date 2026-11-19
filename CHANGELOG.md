@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.8.0 - 2026-11-19
+
+Needs a Ravensight server with `POST /identify` and `identify.salt` on the
+session answer; until then identify sends nothing.
+
+### Added
+
+- `ravensight.identify(accountId)`, `ravensight.resetIdentity()` and `ravensight.isIdentified()` for games with their own login. Only a salted hash of the id (`accountHash`, HMAC-SHA256 keyed with the game's salt from the session answer, using `love.data.hash` when present) is sent, with the session token, once per session; the raw id is never sent or saved and is held in memory only until the salt is known. The hash is saved as `ravensight_identity`. A value that is not a string or whole number, is empty, is over 256 bytes of UTF-8 or contains `@` is refused (`false` and the reason, one warning). A different account first resets the identity, which also switches to a fresh device id; `resetDeviceId()` alone keeps it. A failed or refused request is tried again at the next session, never in a loop. Without a key, before an opt-in yes or in a playtest run nothing is saved or sent, and opting out deletes the saved hash. In a web build the page's JavaScript SDK handles identify: `identify()` returns `false, "use_javascript"`.
+
 ## 0.7.1 - 2026-11-15
 
 Public text no longer names the infrastructure behind the service. The upload host check is unchanged in what it accepts, and now also refuses an address with an explicit port. No API or behaviour change for games.

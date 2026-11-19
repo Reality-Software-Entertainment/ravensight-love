@@ -9,7 +9,8 @@
 -- promise in the docs holds for a LÖVE game too:
 --
 --   * a random per-install device id, 32 hex characters, a dash and the
---     lowercased OS name, never derived from hardware or an account
+--     lowercased OS name, never derived from hardware or an account; only
+--     identify() links it to the game's own account, as a salted hash
 --   * GET /api/v1/settings once at start; the kill switch wins when off
 --   * POST /api/v1/session, then POST /api/v1/track/batch, 50 events at most,
 --     sent every flushInterval seconds (2 by default) or as soon as 50 wait
@@ -39,7 +40,7 @@ local Hmac = require(((...):gsub('core$', 'hmac')))
 local Core = {}
 Core.__index = Core
 
-Core.VERSION = '0.7.1'
+Core.VERSION = '0.8.0'
 Core.MAX_BATCH_SIZE = 50
 Core.DEFAULT_RETRY_SECONDS = 10
 Core.MAX_BACKOFF_SECONDS = 300

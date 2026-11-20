@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.2 - 2026-11-20
+
+An upload address check no longer hardcodes a host. A screenshot upload goes only to an https address with a plain host name, no user info and no port, and a retry for the same report goes only to the host the API named for it the first time. No API change for games.
+
 ## 0.7.1 - 2026-11-15
 
 Public text no longer names the infrastructure behind the service. The upload host check is unchanged in what it accepts, and now also refuses an address with an explicit port. No API or behaviour change for games.

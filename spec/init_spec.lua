@@ -878,4 +878,125 @@ return {
       eq(love.errorhandler, default)
     end)
   end },
+  -- ------------------------------------------------ 0.8.0: identify
+
+  { 'identify on the desktop hashes with the session salt and sends once', function()
+    run(nil, nil, function(w)
+      local salt = string.rep('ab', 32)
+      local sent = errorWorld(w, { identify = { salt = salt } })
+      w.sdk.init({ ingestKey = 'gt_live_k', synchronous = true })
+      w.sdk.update(0)
+      eq(w.sdk.identify('u1'), true)
+      eq(w.sdk.isIdentified(), true)
+      local identifies = {}
+      for _, req in ipairs(sent) do if req.url:find('/api/v1/identify', 1, true) then identifies[#identifies + 1] = req end end
+      eq(#identifies, 1, 'one identify')
+      eq(identifies[1].body, '{"accountHash":"' .. require('ravensight.hmac').hex(salt, 'u1') .. '"}')
+      local ok, reason = w.sdk.identify('a@b')
+      eq(ok, false); eq(reason, 'looks_like_email')
+      w.sdk.resetIdentity()
+      eq(w.sdk.isIdentified(), false)
+      eq(w.files.ravensight_identity, nil)
+    end)
+  end },
+
+  { 'identify with no key is validated and held in memory only', function()
+    run(nil, nil, function(w)
+      local selected = false
+      package.loaded['ravensight.transport'] = { select = function() selected = true end }
+      w.sdk.init({ ingestKey = '', optional = true })
+      eq(w.sdk.identify('u1'), true)
+      eq(w.sdk.isIdentified(), true)
+      local ok, reason = w.sdk.identify('')
+      eq(ok, false); eq(reason, 'empty')
+      w.sdk.resetIdentity()
+      eq(w.sdk.isIdentified(), false)
+      eq(next(w.files), nil, 'no file')
+      eq(selected, false, 'no transport')
+    end)
+  end },
+
+  { 'identify before init refuses bad input and says not_started', function()
+    run(nil, nil, function(w)
+      local ok, reason = w.sdk.identify(12.5)
+      eq(ok, false); eq(reason, 'not_text')
+      ok, reason = w.sdk.identify('u1')
+      eq(ok, false); eq(reason, 'not_started')
+      eq(w.sdk.isIdentified(), false)
+    end)
+  end },
+
+  { 'web: identify is handled by ravensight-js on the page; nothing is printed for the bridge', function()
+    run('Web', nil, function(w)
+      w.sdk.init({ transport = 'web' })
+      local ok, reason = w.sdk.identify('u1')
+      eq(ok, false); eq(reason, 'use_javascript')
+      ok, reason = w.sdk.identify('a@b')
+      eq(ok, false); eq(reason, 'looks_like_email')
+      w.sdk.resetIdentity()
+      eq(#w.after(), 0, 'no tagged line')
+      for _, line in ipairs(w.lines) do assert(not line:find('u1', 1, true), 'the id is never printed') end
+      eq(w.sdk.isIdentified(), false)
+    end)
+  end },
+
+  -- ---------------------------------------------------------- campaign links
+
+  { 'setCampaignLink before init goes with the first session; after init with the next one', function()
+    local link = '64b0000000000000000000a1'
+    run(nil, nil, function(w)
+      local sent = errorWorld(w, {})
+      eq(w.sdk.setCampaignLink(link:upper()), true, 'held before init')
+      w.sdk.init({ ingestKey = 'gt_live_k', synchronous = true })
+      for _ = 1, 3 do w.sdk.update(0) end
+      local links = {}
+      for _, req in ipairs(sent) do
+        if req.url:find('/session$') then links[#links + 1] = json.decode(req.body).campaignLink or '-' end
+      end
+      eq(table.concat(links, ','), link, 'sent lowercased with the first session')
+      eq(w.sdk.setCampaignLink('64B0000000000000000000B2'), true, 'accepted after init')
+      local ok, reason = w.sdk.setCampaignLink('nope')
+      eq(ok, false); eq(reason, 'invalid_link')
+      for name, text in pairs(w.files) do
+        assert(not tostring(text):find(link, 1, true), 'never saved: ' .. name)
+      end
+    end)
+  end },
+
+  { 'setCampaignLink with no key or enabled = false is validated, held in memory and never sent', function()
+    for _, options in ipairs({ { ingestKey = '', optional = true }, { ingestKey = 'gt_live_k', enabled = false } }) do
+      run(nil, nil, function(w)
+        local selected = false
+        package.loaded['ravensight.transport'] = { select = function() selected = true end }
+        w.sdk.init(options)
+        eq(w.sdk.setCampaignLink('64b0000000000000000000a1'), true)
+        local ok, reason = w.sdk.setCampaignLink(nil)
+        eq(ok, false); eq(reason, 'invalid_link')
+        eq(next(w.files), nil, 'no file')
+        eq(selected, false, 'no transport')
+      end)
+    end
+  end },
+
+  { 'web: setCampaignLink is the page SDK\'s; nothing is printed for the bridge', function()
+    run('Web', nil, function(w)
+      local ok, reason = w.sdk.setCampaignLink('64b0000000000000000000a1')
+      eq(ok, false); eq(reason, 'use_javascript', 'before init on the web')
+      w.sdk.init({ transport = 'web' })
+      ok, reason = w.sdk.setCampaignLink('64b0000000000000000000a1')
+      eq(ok, false); eq(reason, 'use_javascript')
+      ok, reason = w.sdk.setCampaignLink('abc')
+      eq(ok, false); eq(reason, 'invalid_link')
+      eq(#w.after(), 0, 'no tagged line')
+      for _, line in ipairs(w.lines) do assert(not line:find('64b0', 1, true), 'the id is never printed') end
+    end)
+  end },
+
+  { 'web: setCampaignLink says use_javascript after an init that opened no transport (enabled = false)', function()
+    run('Web', nil, function(w)
+      w.sdk.init({ transport = 'web', enabled = false })
+      local ok, reason = w.sdk.setCampaignLink('64b0000000000000000000a1')
+      eq(ok, false); eq(reason, 'use_javascript')
+    end)
+  end },
 }

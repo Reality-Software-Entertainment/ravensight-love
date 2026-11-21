@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.0 - 2026-11-21
+
+Needs a Ravensight server with `POST /identify` and `identify.salt` on the
+session answer; until then identify sends nothing.
+
+### Added
+
+- `ravensight.identify(accountId)`, `ravensight.resetIdentity()` and `ravensight.isIdentified()` for games with their own login. Only a salted hash of the id (`accountHash`, HMAC-SHA256 keyed with the game's salt from the session answer, using `love.data.hash` when present) is sent, with the session token, once per session; the raw id is never sent or saved and is held in memory only until the salt is known. The hash is saved as `ravensight_identity`. A value that is not a string or whole number, is empty, is over 256 bytes of UTF-8 or contains `@` is refused (`false` and the reason, one warning). A different account first resets the identity, which also switches to a fresh device id; `resetDeviceId()` alone keeps it. A failed or refused request is tried again at the next session, never in a loop; a 404 or a malformed-hash answer stops identify for the launch, and a second `no_session` answer in a row stops it until `resetIdentity()`. Pass a random, high-entropy id (a random UUID, or a random analytics id stored with the account), never a sequential database key: the salt reaches every copy of the game, so a guessable id can be matched, and the hash is a pseudonymous identifier to declare in your privacy notice. Without a key, before an opt-in yes or in a playtest run nothing is saved or sent, and opting out deletes the saved hash. In a web build the page's JavaScript SDK handles identify (`rs.identify()`, `ravensight` 0.12.0 or newer): `identify()` returns `false, "use_javascript"`.
+- `ravensight.setCampaignLink(linkId)` passes a Ravensight campaign link on from the address a desktop game was opened with. A link id (24 hex characters, sent lowercased) goes as `campaignLink` on the next session the SDK opens for its own player, never in a playtest run, and is cleared only when that session answers with a token; a call before `init` goes with the first session. Returns `true`, or `false` and `"invalid_link"`. Memory only, with the same consent and key rules as everything else. In a web build the page's JavaScript SDK reads `rs_link` from the page address itself (`ravensight` 0.8.0 or newer), and `setCampaignLink()` returns `false, "use_javascript"`.
+
 ## 0.7.2 - 2026-11-20
 
 An upload address check no longer hardcodes a host. A screenshot upload goes only to an https address with a plain host name, no user info and no port, and a retry for the same report goes only to the host the API named for it the first time. No API change for games.

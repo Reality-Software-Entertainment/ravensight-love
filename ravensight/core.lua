@@ -9,7 +9,8 @@
 -- promise in the docs holds for a LÖVE game too:
 --
 --   * a random per-install device id, 32 hex characters, a dash and the
---     lowercased OS name, never derived from hardware or an account
+--     lowercased OS name, never derived from hardware or an account; only
+--     identify() links it to the game's own account, as a salted hash
 --   * GET /api/v1/settings once at start; the kill switch wins when off
 --   * POST /api/v1/session, then POST /api/v1/track/batch, 50 events at most,
 --     sent every flushInterval seconds (2 by default) or as soon as 50 wait
@@ -39,7 +40,7 @@ local Hmac = require(((...):gsub('core$', 'hmac')))
 local Core = {}
 Core.__index = Core
 
-Core.VERSION = '0.7.2'
+Core.VERSION = '0.8.0'
 Core.MAX_BATCH_SIZE = 50
 Core.DEFAULT_RETRY_SECONDS = 10
 Core.MAX_BACKOFF_SECONDS = 300
@@ -80,6 +81,12 @@ Core.QUEUE_FILE = Core.LEGACY_QUEUE_FILE
 Core.ATTRIBUTION_FILE = 'ravensight_attribution'
 --- Written only with consent = "opt_in", once the player has said yes.
 Core.OPTIN_FILE = 'ravensight_optin'
+--- identify(): {"accountHash", "salt"} as JSON, beside the device id. Never
+--- the account id.
+Core.IDENTITY_FILE = 'ravensight_identity'
+Core.IDENTIFY_MAX_BYTES = 256
+--- A campaign link id: this many hex characters, sent lowercased.
+Core.CAMPAIGN_LINK_LENGTH = 24
 
 Core.CONSENT_OPT_OUT = 'opt_out'
 Core.CONSENT_OPT_IN = 'opt_in'
@@ -293,6 +300,24 @@ function Core.new(deps)
   self.deliveryStats = { dropped_overflow = 0, dropped_too_old = 0, dropped_refused = 0 }
   self.exposed = {}
 
+  -- identify(): {salt, accountHash} once hashed, or nil; a valid account id
+  -- waiting for the salt or the player's yes (memory only); the salt from
+  -- the session answer, with saltState 'unknown', 'known' or 'missing' (an
+  -- older server: unavailable this launch). The generation is bumped when
+  -- the identity is replaced or forgotten, so a late answer changes nothing.
+  self.identity = nil
+  self.heldAccountId = nil
+  self.identifySalt = nil
+  self.identifySaltState = 'unknown'
+  self.identifyGeneration = 0
+  self.identifySentOn = nil
+  self.identifyStopped = false
+  self.identifyNoSessionRetried = false
+
+  -- The campaign link waiting for the next session this core opens for its
+  -- own player (24 lowercase hex characters), or nil. Memory only.
+  self.campaignLink = nil
+
   self.playtestToken = ''
   self.playtestRunId = ''
   self.playtestTags = nil
@@ -362,6 +387,7 @@ function Core:loadIdentity()
   if self.identityLoaded or self.playtestToken ~= '' then return end
   self.identityLoaded = true
   self.deviceId = self:loadOrCreateDeviceId()
+  if not self.identity and self.heldAccountId == nil then self.identity = self:readSavedIdentity() end
   self:loadSavedQueue()
 end
 
@@ -502,13 +528,16 @@ function Core:startSession()
   if self.distribution then body.distribution = self.distribution end
   if next(self.device) then body.device = self.device end
   body.sdk = 'love/' .. Core.VERSION
+  -- The player's own session only, never a playtest run, and once.
+  local campaignLink = self.playtestToken == '' and self.campaignLink or nil
+  if campaignLink then body.campaignLink = campaignLink end
   self.send({
     method = 'POST',
     url = self.apiUrl .. '/api/v1/session',
     headers = headers,
     body = json.encode(body),
   }, function(status, body, responseHeaders)
-    self:onSessionResponse(status, body, responseHeaders, generation)
+    self:onSessionResponse(status, body, responseHeaders, generation, campaignLink)
   end)
 end
 
@@ -544,7 +573,14 @@ local function retryAfter(headers)
   return seconds or -1
 end
 
-function Core:onSessionResponse(status, body, headers, generation)
+function Core:onSessionResponse(status, body, headers, generation, campaignLink)
+  -- The campaign link this request carried opened a session, so it is never
+  -- sent again, even when the answer is otherwise ignored below. A link set
+  -- while the request was in flight waits for the next session.
+  if status == 201 and campaignLink and campaignLink == self.campaignLink then
+    local opened = json.decode(body or '')
+    if type(opened) == 'table' and opened.token then self.campaignLink = nil end
+  end
   -- A newer attempt has started since this one went out: ignore it.
   if generation ~= self.sessionGeneration then return end
   self.sessionPending = false
@@ -557,10 +593,12 @@ function Core:onSessionResponse(status, body, headers, generation)
       self:readErrorCapture(parsed)
       self.sessionAnswered = true
       self:adoptSessionExtras(parsed)
+      self:readIdentifySalt(parsed)
       self.backoff = Core.DEFAULT_RETRY_SECONDS
       self.log('info', 'session ready')
       self:emit('session_ready')
       self:flushPending()
+      self:sendIdentify()
       self:fetchConfig()
     else
       self.log('error', 'malformed session response')
@@ -1125,6 +1163,8 @@ end
 --- Player opt-out, saved across launches. false drops the queue and stops
 --- every request; true re-reads the kill switch and starts again.
 function Core:setTrackingEnabled(enabled)
+  -- Opting out, or withdrawing consent, forgets the signed-in account.
+  if not enabled then self:forgetIdentity() end
   if enabled and not self.playerOptedOut then return end
   self.playerOptedOut = not enabled
   if self.playerOptedOut then
@@ -1139,6 +1179,7 @@ function Core:setTrackingEnabled(enabled)
     Core.saveChoice(self.storage, self.consent, true)
     -- With opt_in this is the first moment an id may exist.
     self:loadIdentity()
+    self:hashHeldAccount()
     if self.keyRefused then
       self.log('info', 'the choice is saved; the key was refused, so nothing is sent this run')
       return
@@ -1174,6 +1215,225 @@ function Core:resetDeviceId()
   self.storage.write(Core.DEVICE_ID_FILE, self.deviceId)
   self:dropSession()
   self:clearQueue(true)
+end
+
+-- ---------------------------------------------------------- campaign links
+
+--- `value` lowercased when it is a campaign link id (24 hex characters, in
+--- any case), otherwise nil. Never trimmed: surrounding spaces refuse it.
+function Core.campaignLinkId(value)
+  if type(value) ~= 'string' or #value ~= Core.CAMPAIGN_LINK_LENGTH or not value:match('^%x+$') then return nil end
+  return value:lower()
+end
+
+--- Holds a campaign link for the next session this core opens. Returns true
+--- when `value` is a link id, which then replaces any link waiting; false,
+--- with nothing changed, otherwise. Memory only, never sent in a playtest
+--- run, and cleared only when a session that carried it answers 201 with a
+--- token.
+function Core:setCampaignLink(value)
+  local id = Core.campaignLinkId(value)
+  if not id then return false end
+  self.campaignLink = id
+  return true
+end
+
+-- ---------------------------------------------------------------- identify
+
+--- The account id as text, exactly as given (never trimmed or normalised):
+--- a string, or a whole number as its decimal digits. nil for anything else.
+function Core.identifyText(value)
+  if type(value) == 'string' then return value end
+  if type(value) == 'number' and value == value and value ~= math.huge and value ~= -math.huge
+    and value == math.floor(value) and math.abs(value) <= 9007199254740991 then
+    return string.format('%d', value)
+  end
+  return nil
+end
+
+--- The account id identify() would hash, or nil and the reason it is
+--- refused: not_text, empty, too_long (over 256 bytes of UTF-8) or
+--- looks_like_email (any "@").
+function Core.identifyRefusal(value)
+  local text = Core.identifyText(value)
+  if text == nil then return nil, 'not_text' end
+  if text == '' then return nil, 'empty' end
+  if #text > Core.IDENTIFY_MAX_BYTES then return nil, 'too_long' end
+  if text:find('@', 1, true) then return nil, 'looks_like_email' end
+  return text
+end
+
+local function isHex64(value)
+  return type(value) == 'string' and #value == 64 and value:match('^[0-9a-f]+$') ~= nil
+end
+
+--- Lowercase hex HMAC-SHA256 keyed with the salt text as given (not
+--- hex-decoded) over the account id's bytes.
+function Core:identifyHash(salt, id)
+  return Hmac.hex(salt, id, self.sha256)
+end
+
+--- Whether identify may hash and save now: a key, the player's choice, not
+--- a playtest run.
+function Core:identityAllowed()
+  return self.started and self.ingestKey ~= '' and not self.playerOptedOut and self.playtestToken == '' and self.identityLoaded
+end
+
+--- Links this device to the game's own account (see ravensight.identify).
+--- Returns true, or false and the reason it was refused; nothing changes on
+--- a refusal.
+function Core:identify(accountId)
+  local id, reason = Core.identifyRefusal(accountId)
+  if not id then return false, reason end
+  -- A different account than the one stored or held: a sign-out first.
+  if not self:isSameAccount(id) then self:resetIdentity() end
+  if self.identifySaltState == 'missing' then
+    self.log('info', 'identify is not offered by this server; nothing is sent this launch')
+    return true
+  end
+  if self.identifySaltState == 'unknown' or not self:identityAllowed() then
+    -- No salt this launch yet, or not allowed to save: hold the id in memory
+    -- only, and hash it under whichever salt the session answer brings.
+    self.heldAccountId = id
+    return true
+  end
+  if not self.identity then
+    self.identity = { salt = self.identifySalt, accountHash = self:identifyHash(self.identifySalt, id) }
+    self:writeIdentity()
+  end
+  self.heldAccountId = nil
+  if self:isSessionValid() then
+    self:sendIdentify()
+  elseif not self.settingsPending then
+    self:startSession()
+  end
+  return true
+end
+
+--- For sign-out: forgets the stored or held account and switches to a fresh
+--- device id as resetDeviceId() does. Sends nothing; does nothing when no
+--- account is stored or held.
+function Core:resetIdentity()
+  -- An identity saved by an earlier launch counts too, even before the
+  -- opt-in yes, when it was never loaded.
+  local onDisk = self.playtestToken == '' and self.storage.read(Core.IDENTITY_FILE) ~= nil
+  if not self.identity and self.heldAccountId == nil and not onDisk then return end
+  self:forgetIdentity()
+  self:resetDeviceId()
+end
+
+function Core:isIdentified()
+  return self.identity ~= nil or self.heldAccountId ~= nil
+end
+
+function Core:isSameAccount(id)
+  if self.heldAccountId ~= nil then return self.heldAccountId == id end
+  if self.identity then return self:identifyHash(self.identity.salt, id) == self.identity.accountHash end
+  return true
+end
+
+function Core:forgetIdentity()
+  self.identifyGeneration = self.identifyGeneration + 1
+  self.identifySentOn = nil
+  self.heldAccountId = nil
+  self.identity = nil
+  self.identifyNoSessionRetried = false
+  -- Never the player's saved identity in a playtest run.
+  if self.playtestToken == '' then self.storage.remove(Core.IDENTITY_FILE) end
+end
+
+--- The saved identity when it is well formed, else nil. Never writes.
+function Core:readSavedIdentity()
+  if self.playtestToken ~= '' then return nil end
+  local ok, parsed = pcall(json.decode, self.storage.read(Core.IDENTITY_FILE) or '')
+  if ok and type(parsed) == 'table' and isHex64(parsed.salt) and isHex64(parsed.accountHash) then
+    return { salt = parsed.salt, accountHash = parsed.accountHash }
+  end
+  return nil
+end
+
+function Core:writeIdentity()
+  if not self.identity or not self:identityAllowed() then return end
+  self.storage.write(Core.IDENTITY_FILE, json.encode(self.identity))
+end
+
+--- Hashes a held account id once the salt is known and saving is allowed.
+function Core:hashHeldAccount()
+  if self.heldAccountId == nil or self.identifySaltState ~= 'known' or not self:identityAllowed() then return end
+  self.identity = { salt = self.identifySalt, accountHash = self:identifyHash(self.identifySalt, self.heldAccountId) }
+  self.heldAccountId = nil
+  self:writeIdentity()
+end
+
+--- Reads identify.salt from a session answer. The first answer decides
+--- whether this server offers identify this launch; a salt other than the
+--- saved one (another game's key) deletes the saved identity unsent.
+function Core:readIdentifySalt(answer)
+  if self.identifySaltState == 'missing' then return end
+  local salt = type(answer.identify) == 'table' and answer.identify.salt or nil
+  if not isHex64(salt) then
+    if self.identifySaltState == 'unknown' then
+      self.identifySaltState = 'missing'
+      self.heldAccountId = nil
+      self.identifyGeneration = self.identifyGeneration + 1
+    end
+    return
+  end
+  self.identifySalt = salt
+  self.identifySaltState = 'known'
+  if self.identity and self.identity.salt ~= salt then
+    local held = self.heldAccountId
+    self:forgetIdentity()
+    self.heldAccountId = held
+  end
+  self:hashHeldAccount()
+end
+
+--- Sends the identity on the open session, once per session. Never queued.
+function Core:sendIdentify()
+  local identity = self.identity
+  if not identity or self.identifySaltState ~= 'known' or identity.salt ~= self.identifySalt then return end
+  if self.identifyStopped or not self.trackingEnabled or self.keyRefused or not self:isSessionValid() then return end
+  if self.identifySentOn == self.sessionToken then return end
+  self.identifySentOn = self.sessionToken
+  local generation = self.identifyGeneration
+  self.send({
+    method = 'POST',
+    url = self.apiUrl .. '/api/v1/identify',
+    headers = { ['Content-Type'] = 'application/json', ['X-API-Key'] = self.ingestKey, ['X-Session-Token'] = self.sessionToken },
+    body = json.encode({ accountHash = identity.accountHash }),
+  }, function(status, body)
+    self:onIdentifyResponse(status, body, generation)
+  end)
+end
+
+function Core:onIdentifyResponse(status, body, generation)
+  local errorCode = extractError(body, '')
+  -- The server does not offer identify, or calls the hash malformed (a
+  -- bug): whatever identity is current, retrying this launch cannot help.
+  if status == 404 then
+    self.identifyStopped = true
+    return
+  end
+  if status == 400 and errorCode == 'invalid_account_hash' then
+    self.identifyStopped = true
+    self.log('warn', 'identify was refused as invalid_account_hash; not retried this launch')
+    return
+  end
+  -- A late answer for an identity since replaced or forgotten.
+  if generation ~= self.identifyGeneration then return end
+  if status == 200 then
+    self.identifyNoSessionRetried = false
+  elseif status == 400 and errorCode == 'no_session' then
+    -- Again once, when the next session opens; twice in a row ends it.
+    if self.identifyNoSessionRetried then self.identifyStopped = true end
+    self.identifyNoSessionRetried = true
+  else
+    self.identifyNoSessionRetried = false
+  end
+  -- Anything else (409, 429 identify_limited, rate_limited or needs_funds,
+  -- 5xx, offline): the identity is kept, this session is not tried again,
+  -- and the next session tries once more.
 end
 
 function Core:dropSession()

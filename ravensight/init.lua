@@ -47,6 +47,7 @@ local health        -- the performance sampler, only with performance = true
 local capture       -- automatic error capture (ravensight/errors.lua), once installed
 local held = {}     -- boot errors captured before the first session answer
 local MAX_HELD = 5
+local heldCampaignLink -- a campaign link id set before init (memory only)
 --- Crashes captured before the session answer, saved so the next launch can
 --- send them once its answer says capture is on, or discard them if off.
 local CRASH_FILE = 'ravensight_crash.json'
@@ -608,6 +609,11 @@ function ravensight.init(options)
   -- The session answer carries the game's switch: it releases or discards
   -- the boot errors held until then.
   core:on('session_ready', function() pcall(releaseHeld) end)
+  -- A campaign link the game set before init goes with the first session.
+  if heldCampaignLink then
+    core:setCampaignLink(heldCampaignLink)
+    heldCampaignLink = nil
+  end
   core:start()
   installCapture()
   if config.performance then
@@ -802,6 +808,119 @@ function ravensight.resetDeviceId()
   core:resetDeviceId()
   held = {}
   storage.remove(CRASH_FILE)
+end
+
+-- ------------------------------------------- identify players who sign in
+
+local inertAccountId -- a valid id held in memory by an inert or disabled start
+local warnedWebIdentify = false
+
+--- A new device id forgets the captures of the old one, as resetDeviceId does.
+local function forgetCapturesIfDeviceChanged(before)
+  if core.deviceId ~= before then
+    held = {}
+    storage.remove(CRASH_FILE)
+  end
+end
+
+--- Links this device to your game's own account once the player signs in,
+--- so one person on two devices, or before and after sign-in, counts as one
+--- player. Pass an opaque internal id (a database key or a UUID), a string
+--- or a whole number used as its decimal digits; never an email or a name.
+---
+--- Only a salted hash of the id (accountHash, HMAC-SHA256 keyed with the
+--- game's salt from the session answer) is sent, with the session token,
+--- once per session, and saved as ravensight_identity beside the device id.
+--- The id itself is held in memory only until that salt is known. A
+--- different account first does resetIdentity(). It never enters the event
+--- queue or delays an event. Without a key, before an opt_in yes, or in a
+--- playtest run it is held in memory only.
+---
+--- Returns true, or false and the reason: "not_text", "empty", "too_long"
+--- (over 256 bytes of UTF-8), "looks_like_email" (any "@"), "not_started"
+--- (before init), or "use_javascript" in a web build, where the page's
+--- ravensight-js handles identify. A refusal changes nothing.
+function ravensight.identify(accountId)
+  local id, reason = Core.identifyRefusal(accountId)
+  if not id then
+    log('warn', 'identify() refused (' .. reason .. '): pass a non-empty internal id of at most 256 bytes with no @')
+    return false, reason
+  end
+  if not initialized then return false, 'not_started' end
+  if transportName == 'web' then
+    if not warnedWebIdentify then
+      warnedWebIdentify = true
+      log('warn', 'identify() is handled by ravensight-js on the page in a web build; call it there')
+    end
+    return false, 'use_javascript'
+  end
+  if not core then
+    -- Inert (no key) or enabled = false: held in memory, never sent.
+    inertAccountId = id
+    return true
+  end
+  local before = core.deviceId
+  local ok, why = core:identify(id)
+  forgetCapturesIfDeviceChanged(before)
+  return ok, why
+end
+
+--- For sign-out: forgets the account and switches to a fresh device id as
+--- resetDeviceId() does, so the next player is not linked to the last one.
+--- Sends nothing; does nothing when no account is set. In a web build the
+--- page owns the identity; call the JavaScript SDK there instead.
+function ravensight.resetIdentity()
+  inertAccountId = nil
+  if not core then return end
+  if transportName == 'web' then
+    log('info', 'resetIdentity() is handled by ravensight-js on the page in a web build')
+    return
+  end
+  local before = core.deviceId
+  core:resetIdentity()
+  forgetCapturesIfDeviceChanged(before)
+end
+
+--- True while an account is set by identify(). The id is never readable.
+function ravensight.isIdentified()
+  if core and transportName ~= 'web' then return core:isIdentified() end
+  return inertAccountId ~= nil
+end
+
+-- ---------------------------------------------------------- campaign links
+
+local warnedWebCampaignLink = false
+
+--- Sends a Ravensight campaign link with the next session the SDK opens, so
+--- the player is counted on the Campaign links page. Call it from the
+--- handler your game already has for the address it was opened with (a
+--- custom URL scheme, a deep link, an install referrer), with the `rs_link`
+--- value of that address. Best called before init, or before the first
+--- session opens; a later call goes with the next session.
+---
+--- Returns true when `linkId` is a link id (24 hex characters, in any case),
+--- which then replaces any link waiting. Otherwise false and the reason:
+--- "invalid_link", or "use_javascript" in a web build, where the page's
+--- ravensight-js reads rs_link from the page address itself. A refusal
+--- changes nothing. Memory only; sent once, never in a playtest run, and
+--- only when a session may open (a key, enabled, and the player's consent).
+function ravensight.setCampaignLink(linkId)
+  local id = Core.campaignLinkId(linkId)
+  if not id then return false, 'invalid_link' end
+  -- The OS, not only the transport: an init with enabled = false opens no
+  -- transport, and the page still owns the link.
+  if transportName == 'web' or systemName() == 'Web' then
+    if not warnedWebCampaignLink then
+      warnedWebCampaignLink = true
+      log('info', 'setCampaignLink() is not needed in a web build: the page\'s ravensight-js reads rs_link from the page address')
+    end
+    return false, 'use_javascript'
+  end
+  if core then return core:setCampaignLink(id) end
+  -- Before init it is handed to the core at init. With no key or
+  -- enabled = false it stays here, in memory, and is never sent.
+  heldCampaignLink = id
+  return true
 end
 
 --- This install's random device id. nil in a web build, where the page's

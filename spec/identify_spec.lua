@@ -379,6 +379,40 @@ return {
     eq(w.count(), 2, 'twice in a row ends it this launch')
   end },
 
+  { 'a second no_session in a row stops identify only until resetIdentity', function()
+    local w = world({ salt = SALT })
+    local core = started(w)
+    core:identify('u1')
+    w.serve({ { 400, { error = 'no_session' } } })
+    w.nextSession(core, { { 400, { error = 'no_session' } } })
+    eq(w.count(), 2)
+    w.nextSession(core)
+    eq(w.count(), 2, 'stopped after two in a row')
+    -- The same account again does not lift the stop.
+    core:identify('u1')
+    w.serve()
+    eq(w.count(), 2, 'the same account stays stopped')
+    -- Sign-out lifts it: the next account is identified on its new session.
+    core:resetIdentity()
+    core:identify('u2')
+    w.serve()
+    eq(w.count(), 3, 'identified again after resetIdentity')
+    eq(w.sends(2)[1].accountHash, Hmac.hex(SALT, 'u2', core.sha256))
+    eq(w.sends(2)[1].session, core.sessionToken)
+  end },
+
+  { 'a 404 still stops identify for the launch, even after resetIdentity', function()
+    local w = world({ salt = SALT })
+    local core = started(w)
+    core:identify('u1')
+    w.serve({ { 404, {} } })
+    eq(w.count(), 1)
+    core:resetIdentity()
+    core:identify('u2')
+    w.serve()
+    eq(w.count(), 1, 'the server does not offer identify this launch')
+  end },
+
   { 'resetDeviceId alone keeps the identity and the next session identifies again', function()
     local w = world({ salt = SALT })
     local core = started(w)

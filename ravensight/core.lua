@@ -311,8 +311,12 @@ function Core.new(deps)
   self.identifySaltState = 'unknown'
   self.identifyGeneration = 0
   self.identifySentOn = nil
+  -- identifyStopped: a 404 or invalid_account_hash, for the whole launch.
+  -- identifyNoSessionStopped: a second no_session in a row, until
+  -- resetIdentity() or the identity is forgotten.
   self.identifyStopped = false
   self.identifyNoSessionRetried = false
+  self.identifyNoSessionStopped = false
 
   -- The campaign link waiting for the next session this core opens for its
   -- own player (24 lowercase hex characters), or nil. Memory only.
@@ -1338,6 +1342,7 @@ function Core:forgetIdentity()
   self.heldAccountId = nil
   self.identity = nil
   self.identifyNoSessionRetried = false
+  self.identifyNoSessionStopped = false
   -- Never the player's saved identity in a playtest run.
   if self.playtestToken == '' then self.storage.remove(Core.IDENTITY_FILE) end
 end
@@ -1393,7 +1398,8 @@ end
 function Core:sendIdentify()
   local identity = self.identity
   if not identity or self.identifySaltState ~= 'known' or identity.salt ~= self.identifySalt then return end
-  if self.identifyStopped or not self.trackingEnabled or self.keyRefused or not self:isSessionValid() then return end
+  if self.identifyStopped or self.identifyNoSessionStopped then return end
+  if not self.trackingEnabled or self.keyRefused or not self:isSessionValid() then return end
   if self.identifySentOn == self.sessionToken then return end
   self.identifySentOn = self.sessionToken
   local generation = self.identifyGeneration
@@ -1425,8 +1431,12 @@ function Core:onIdentifyResponse(status, body, generation)
   if status == 200 then
     self.identifyNoSessionRetried = false
   elseif status == 400 and errorCode == 'no_session' then
-    -- Again once, when the next session opens; twice in a row ends it.
-    if self.identifyNoSessionRetried then self.identifyStopped = true end
+    -- Again once, when the next session opens; twice in a row ends it until
+    -- resetIdentity() (or the identity is forgotten).
+    if self.identifyNoSessionRetried then
+      self.identifyNoSessionStopped = true
+      self.log('warn', 'identify answered no_session twice in a row; not sent again until resetIdentity()')
+    end
     self.identifyNoSessionRetried = true
   else
     self.identifyNoSessionRetried = false

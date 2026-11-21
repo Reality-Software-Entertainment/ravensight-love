@@ -111,8 +111,8 @@ needs in a web build:
 | 0.2.0 | `web/ravensight-love-bridge.js` | 0.4.0 | The bridge calls `rs.track`, `rs.submitFeedback`, `rs.setEnabled`, `rs.flush` and `rs.init`, all present in 0.4.0. 0.4.0 is the floor because the Lua SDK sends no `game_started` or `game_exited` on the web, and the JavaScript SDK sends them itself only from 0.4.0 (`autoEvents`). 0.4.0 also makes `init()` on an opted-out client open no session, which the remembered opt-out relies on. |
 | 0.3.0 | `web/ravensight-love-bridge.js` | 0.4.0 | No new call on the page's SDK is required. After the exit mailbox, the bridge calls `rs.flushOnHidden()` if it exists, else `rs._flushOnHidden()`, else `rs.flush()`. ravensight-js 0.4.x has the internal `_flushOnHidden` and no public `flushOnHidden` yet, so on 0.4.x the bridge calls `_flushOnHidden`. An opt-in page constructs its SDK with `enabled: false` and the bridge calls `rs.init()` on the player's yes, which 0.4.0 already supports. |
 | 0.4.0 | `web/ravensight-love-bridge.js` | 0.4.0 | The bridge also keeps the latest `health` line and tracks it once on `pagehide`, using `rs.track` only. Nothing new is required of the page's SDK. |
-| 0.8.0 | `web/ravensight-love-bridge.js` | 0.5.1 | No change to the bridge. To identify players in a web build, call `rs.identify()` and `rs.resetIdentity()` on the page's SDK, which needs `ravensight` 0.12.0. Campaign links in a web build are read from the page address by the page's SDK, from `ravensight` 0.8.0. |
 | 0.7.0 | `web/ravensight-love-bridge.js` | 0.5.1 | The bridge passes the game's first config read after each config answer to `rs.getConfig`, so the page SDK counts the experiment exposure. A page SDK with no `getConfig` is skipped. Delivery (saved queue, origins, compression, signing) on the web is the page SDK's. |
+| 0.8.0 | `web/ravensight-love-bridge.js` | 0.5.1 | No change to the bridge. To identify players in a web build, call `rs.identify()` and `rs.resetIdentity()` on the page's SDK, which needs `ravensight` 0.12.0. Campaign links in a web build are read from the page address by the page's SDK, from `ravensight` 0.8.0. |
 
 Nothing in ravensight-love 0.2.0, 0.3.0 or 0.4.0 needs the 0.4.1 additions (`rs.session()`
 and `rs.sessionTokenFor()`), so 0.4.0 or newer is enough. The bridge does not
@@ -777,7 +777,10 @@ ravensight.resetIdentity()                -- on sign-out
   `"looks_like_email"`), prints one warning, and nothing changes.
 - **One event per identified session** on your usage balance. The same
   account again in the same session sends nothing; a refused or failed
-  request is tried once more at the next session, never in a loop.
+  request is tried once more at the next session, never in a loop. A 404
+  (a server without identify) or an `invalid_account_hash` answer stops
+  identify for the launch, and a second `no_session` answer in a row stops
+  it until `resetIdentity()`.
 - **A different account** on the same device first does `resetIdentity()`,
   which deletes the saved hash and switches to a fresh device id (as
   `resetDeviceId()` does), so the next player is not linked to the last
